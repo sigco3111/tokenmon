@@ -326,6 +326,7 @@
 "settings.language.option.korean" = "한국어";
 "settings.general.section.startup" = "시작";
 "settings.general.toggle.launch_at_login" = "로그인 시 실행";
+"settings.general.open_login_items_settings" = "로그인 항목 설정 열기";
 "settings.general.section.menu_bar" = "메뉴 막대";
 "settings.general.toggle.show_provider_status" = "메뉴에 프로바이더 상태 표시";
 "settings.general.toggle.field_backplate" = "필드 대비 백플레이트";
@@ -380,6 +381,7 @@
 
 "settings.feedback.opened_notification_settings" = "Tokenmon용 macOS 알림 설정을 열었습니다.";
 "settings.feedback.opened_notification_settings_generic" = "macOS 알림 설정을 열었습니다.";
+"settings.feedback.opened_login_items_settings" = "시스템 설정의 로그인 항목을 열었습니다.";
 "settings.feedback.opened_system_settings" = "시스템 설정을 열었습니다.";
 "settings.feedback.failed_notification_settings" = "macOS 알림 설정을 열지 못했습니다.";
 "settings.feedback.capture_notifications_enabled" = "포획 알림이 켜졌습니다. Tokenmon은 종을 포획했을 때만 알림을 보냅니다.";

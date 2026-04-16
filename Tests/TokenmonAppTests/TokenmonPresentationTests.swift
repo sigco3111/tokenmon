@@ -2487,6 +2487,29 @@ struct TokenmonPresentationTests {
     }
 
     @Test
+    func launchAtLoginRequiresApprovalShowsSystemSettingsAction() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let fakeHome = directory.appendingPathComponent("fake-home", isDirectory: true)
+        try FileManager.default.createDirectory(at: fakeHome, withIntermediateDirectories: true)
+        let bundle = try makeFakeAppBundle(
+            appURL: fakeHome.appendingPathComponent("Applications/Tokenmon.app", isDirectory: true)
+        )
+        let state = TokenmonLaunchAtLoginController.snapshot(
+            using: TokenmonLaunchAtLoginDependencies(
+                bundle: bundle,
+                fileManager: .default,
+                homeDirectory: fakeHome,
+                nativeStatusProvider: { .requiresApproval },
+                nativeSetter: { _ in }
+            )
+        )
+
+        #expect(state.showsOpenSystemSettingsAction)
+    }
+
+    @Test
     func hotPathRefreshSkipsProviderInspectionUntilSettingsSurfaceOpens() async throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -3146,6 +3169,44 @@ struct TokenmonPresentationTests {
 
         #expect(model.settingsMessage == nil)
         #expect(model.settingsError == TokenmonL10n.string("settings.feedback.failed_notification_settings"))
+    }
+
+    @Test
+    func openLoginItemsSettingsUsesInjectedOpenerAndSetsFeedback() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let databasePath = directory.appendingPathComponent("tokenmon.sqlite").path
+        let manager = TokenmonDatabaseManager(path: databasePath)
+        try manager.bootstrap()
+
+        final class Box: @unchecked Sendable {
+            var count = 0
+        }
+        let box = Box()
+
+        let model = TokenmonMenuModel(
+            databasePath: databasePath,
+            providerInspector: { _, _, _ in [] },
+            launchAtLoginStateProvider: {
+                TokenmonLaunchAtLoginState(
+                    isSupported: true,
+                    isEnabled: false,
+                    reason: TokenmonL10n.string("settings.launch_at_login.reason.requires_approval"),
+                    showsOpenSystemSettingsAction: true
+                )
+            },
+            loginItemsSettingsOpener: {
+                box.count += 1
+            }
+        )
+
+        await model.waitForRefreshToFinish()
+        model.openLoginItemsSettings()
+
+        #expect(box.count == 1)
+        #expect(model.settingsMessage == TokenmonL10n.string("settings.feedback.opened_login_items_settings"))
+        #expect(model.settingsError == nil)
     }
 
     @Test

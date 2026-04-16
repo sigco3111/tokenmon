@@ -168,6 +168,7 @@
 "settings.language.option.korean" = "Korean";
 "settings.general.section.startup" = "Startup";
 "settings.general.toggle.launch_at_login" = "Launch at login";
+"settings.general.open_login_items_settings" = "Open Login Items Settings";
 "settings.general.section.menu_bar" = "Menu Bar";
 "settings.general.toggle.show_provider_status" = "Show provider status in menu bar";
 "settings.general.toggle.field_backplate" = "Show field backplate";
@@ -197,6 +198,7 @@
 "settings.launch_at_login.reason.status_unavailable" = "Tokenmon couldn't confirm launch-at-login registration for this installation.";
 "settings.feedback.opened_notification_settings" = "Opened Tokenmon notification settings.";
 "settings.feedback.opened_notification_settings_generic" = "Opened macOS Notification Settings.";
+"settings.feedback.opened_login_items_settings" = "Opened Login Items in System Settings.";
 "settings.feedback.opened_system_settings" = "Opened System Settings.";
 "settings.feedback.failed_notification_settings" = "Couldn't open macOS Notification Settings.";
 "settings.feedback.capture_notifications_enabled" = "Capture alerts are on. Tokenmon only notifies when a species is captured.";

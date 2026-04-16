@@ -1369,6 +1369,7 @@ private struct TokenmonSettingsScreenshotShell: View {
                 settingsMessage: model.settingsMessage,
                 settingsError: model.settingsError,
                 onSetLaunchAtLogin: { _ in },
+                onOpenLoginItemsSettings: {},
                 onUpdateAppearancePreference: { _ in },
                 onUpdateLanguagePreference: { _ in },
                 onUpdateProviderStatusVisibility: { _ in },
