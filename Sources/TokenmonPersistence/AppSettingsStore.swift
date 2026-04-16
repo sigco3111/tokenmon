@@ -35,7 +35,7 @@ public struct AppSettings: Equatable, Sendable {
 
     public init(
         launchAtLogin: Bool = false,
-        notificationsEnabled: Bool = true,
+        notificationsEnabled: Bool = false,
         providerStatusVisibility: Bool = true,
         fieldBackplateEnabled: Bool = true,
         usageAnalyticsEnabled: Bool = false,

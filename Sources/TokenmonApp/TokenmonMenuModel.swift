@@ -40,6 +40,7 @@ final class TokenmonMenuModel: ObservableObject {
     private let executablePath: String
     private let providerInspector: TokenmonProviderInspector
     private let launchAtLoginStateProvider: @Sendable () -> TokenmonLaunchAtLoginState
+    private let notificationSettingsOpener: @Sendable () -> TokenmonNotificationSettingsOpenResult
     private let notificationCoordinator: TokenmonCaptureNotificationCoordinating
     private let analyticsTracker: TokenmonAnalyticsTracking
     private var refreshTask: Task<Void, Never>?
@@ -56,6 +57,9 @@ final class TokenmonMenuModel: ObservableObject {
         databasePath: String = TokenmonDatabaseManager.defaultPath(),
         providerInspector: @escaping TokenmonProviderInspector = TokenmonProviderOnboarding.inspectAll,
         launchAtLoginStateProvider: @escaping @Sendable () -> TokenmonLaunchAtLoginState = TokenmonLaunchAtLoginController.snapshot,
+        notificationSettingsOpener: @escaping @Sendable () -> TokenmonNotificationSettingsOpenResult = {
+            TokenmonSystemSettingsOpener.openNotificationSettings()
+        },
         notificationCoordinator: TokenmonCaptureNotificationCoordinating = TokenmonNoopCaptureNotificationCoordinator(),
         analyticsTracker: TokenmonAnalyticsTracking = TokenmonNoopAnalyticsTracker()
     ) {
@@ -65,6 +69,7 @@ final class TokenmonMenuModel: ObservableObject {
         inboxMonitor = TokenmonInboxMonitor(databasePath: databasePath)
         self.providerInspector = providerInspector
         self.launchAtLoginStateProvider = launchAtLoginStateProvider
+        self.notificationSettingsOpener = notificationSettingsOpener
         self.notificationCoordinator = notificationCoordinator
         self.analyticsTracker = analyticsTracker
         if let storedSettings = try? databaseManager.appSettings() {
@@ -85,6 +90,7 @@ final class TokenmonMenuModel: ObservableObject {
             event: "menu_model_initialized",
             metadata: ["database_path": databasePath]
         )
+        TokenmonLaunchAtLoginController.cleanupLegacyFallbackIfNeeded()
         refreshNotificationAuthorizationState()
         refresh(reason: .initial)
     }
@@ -157,6 +163,7 @@ final class TokenmonMenuModel: ObservableObject {
             )
         }
         if case .settings = surface {
+            TokenmonLaunchAtLoginController.cleanupLegacyFallbackIfNeeded()
             refreshNotificationAuthorizationState()
         }
         if shouldRefresh {
@@ -399,11 +406,20 @@ final class TokenmonMenuModel: ObservableObject {
     }
 
     func openSystemNotificationSettings() {
-        if TokenmonSystemSettingsOpener.openNotificationSettings() {
+        switch notificationSettingsOpener() {
+        case .openedAppSpecific:
             logInfo(category: "settings", event: "opened_system_notification_settings")
             settingsMessage = TokenmonL10n.string("settings.feedback.opened_notification_settings")
             settingsError = nil
-        } else {
+        case .openedGenericNotifications:
+            logInfo(category: "settings", event: "opened_generic_notification_settings")
+            settingsMessage = TokenmonL10n.string("settings.feedback.opened_notification_settings_generic")
+            settingsError = nil
+        case .openedSystemSettingsRoot:
+            logInfo(category: "settings", event: "opened_system_settings_root")
+            settingsMessage = TokenmonL10n.string("settings.feedback.opened_system_settings")
+            settingsError = nil
+        case .failed:
             logError(category: "settings", event: "failed_to_open_system_notification_settings")
             settingsError = TokenmonL10n.string("settings.feedback.failed_notification_settings")
             settingsMessage = nil
@@ -1453,6 +1469,15 @@ struct TokenmonLaunchAtLoginState: Equatable, Sendable {
     }
 }
 
+enum TokenmonLaunchAtLoginFallbackPolicy: Equatable, Sendable {
+    case nativeOnly
+    case developmentFallbackAllowed
+
+    var allowsLegacyFallback: Bool {
+        self == .developmentFallbackAllowed
+    }
+}
+
 enum TokenmonLaunchAtLoginNativeStatus: Equatable, Sendable {
     case enabled
     case requiresApproval
@@ -1482,6 +1507,26 @@ struct TokenmonLaunchAtLoginDependencies {
     let homeDirectory: URL
     let nativeStatusProvider: () -> TokenmonLaunchAtLoginNativeStatus
     let nativeSetter: (Bool) throws -> Void
+    let fallbackPolicy: TokenmonLaunchAtLoginFallbackPolicy
+    let supportDirectoryPath: String
+
+    init(
+        bundle: Bundle,
+        fileManager: FileManager,
+        homeDirectory: URL,
+        nativeStatusProvider: @escaping () -> TokenmonLaunchAtLoginNativeStatus,
+        nativeSetter: @escaping (Bool) throws -> Void,
+        fallbackPolicy: TokenmonLaunchAtLoginFallbackPolicy = .developmentFallbackAllowed,
+        supportDirectoryPath: String = TokenmonDatabaseManager.supportDirectory()
+    ) {
+        self.bundle = bundle
+        self.fileManager = fileManager
+        self.homeDirectory = homeDirectory
+        self.nativeStatusProvider = nativeStatusProvider
+        self.nativeSetter = nativeSetter
+        self.fallbackPolicy = fallbackPolicy
+        self.supportDirectoryPath = supportDirectoryPath
+    }
 
     static func live() -> TokenmonLaunchAtLoginDependencies {
         TokenmonLaunchAtLoginDependencies(
@@ -1498,7 +1543,10 @@ struct TokenmonLaunchAtLoginDependencies {
                 } else {
                     try service.unregister()
                 }
-            }
+            },
+            fallbackPolicy: TokenmonBuildInfo.current.buildConfiguration == .debug
+                ? .developmentFallbackAllowed
+                : .nativeOnly
         )
     }
 }
@@ -1516,7 +1564,18 @@ enum TokenmonLaunchAtLoginController {
         }
 
         let fallbackAgent = TokenmonLaunchAtLoginFallbackAgent(dependencies: dependencies)
+        if dependencies.fallbackPolicy.allowsLegacyFallback == false {
+            cleanupLegacyFallbackIfNeeded(using: dependencies)
+        }
         let nativeStatus = dependencies.nativeStatusProvider()
+        logDebug(
+            dependencies: dependencies,
+            event: "launch_at_login_native_status_snapshot",
+            metadata: [
+                "status": nativeStatus.logLabel,
+                "fallback_policy": dependencies.fallbackPolicy.logLabel,
+            ]
+        )
         switch nativeStatus {
         case .enabled:
             return TokenmonLaunchAtLoginState(
@@ -1537,26 +1596,31 @@ enum TokenmonLaunchAtLoginController {
                 reason: TokenmonL10n.string("settings.launch_at_login.reason.disabled")
             )
         case .notFound, .statusUnavailable:
-            if fallbackAgent.isSupported {
-                try? fallbackAgent.migrateIfNeeded()
-                let isEnabled = fallbackAgent.isEnabled
-                return TokenmonLaunchAtLoginState(
-                    isSupported: true,
-                    isEnabled: isEnabled,
-                    reason: TokenmonL10n.string(
-                        isEnabled
-                            ? "settings.launch_at_login.reason.enabled"
-                            : "settings.launch_at_login.reason.disabled"
+            if dependencies.fallbackPolicy.allowsLegacyFallback {
+                if fallbackAgent.isSupported {
+                    try? fallbackAgent.migrateIfNeeded()
+                    let isEnabled = fallbackAgent.isEnabled
+                    return TokenmonLaunchAtLoginState(
+                        isSupported: true,
+                        isEnabled: isEnabled,
+                        reason: TokenmonL10n.string(
+                            isEnabled
+                                ? "settings.launch_at_login.reason.enabled"
+                                : "settings.launch_at_login.reason.disabled"
+                        )
                     )
-                )
+                }
+
+                return .unsupported(reason: TokenmonL10n.string("settings.launch_at_login.reason.installed_only"))
             }
 
+            logInfo(
+                dependencies: dependencies,
+                event: "launch_at_login_native_path_unsupported",
+                metadata: ["status": nativeStatus.logLabel]
+            )
             return .unsupported(
-                reason: TokenmonL10n.string(
-                    nativeStatus == .statusUnavailable
-                        ? "settings.launch_at_login.reason.status_unavailable"
-                        : "settings.launch_at_login.reason.installed_only"
-                )
+                reason: TokenmonL10n.string("settings.launch_at_login.reason.status_unavailable")
             )
         }
     }
@@ -1574,12 +1638,28 @@ enum TokenmonLaunchAtLoginController {
         }
 
         let fallbackAgent = TokenmonLaunchAtLoginFallbackAgent(dependencies: dependencies)
+        if dependencies.fallbackPolicy.allowsLegacyFallback == false {
+            cleanupLegacyFallbackIfNeeded(using: dependencies)
+        }
         switch dependencies.nativeStatusProvider() {
         case .enabled, .requiresApproval, .notRegistered:
             try fallbackAgent.disableIfPresent()
+            logInfo(
+                dependencies: dependencies,
+                event: "launch_at_login_native_registration_attempted",
+                metadata: ["enabled": String(enabled)]
+            )
             try dependencies.nativeSetter(enabled)
         case .notFound, .statusUnavailable:
-            guard fallbackAgent.isSupported else {
+            guard dependencies.fallbackPolicy.allowsLegacyFallback, fallbackAgent.isSupported else {
+                logInfo(
+                    dependencies: dependencies,
+                    event: "launch_at_login_native_path_unsupported",
+                    metadata: [
+                        "status": dependencies.nativeStatusProvider().logLabel,
+                        "enabled": String(enabled),
+                    ]
+                )
                 return snapshot(using: dependencies)
             }
             try fallbackAgent.setEnabled(enabled)
@@ -1588,9 +1668,76 @@ enum TokenmonLaunchAtLoginController {
         return snapshot(using: dependencies)
     }
 
+    @discardableResult
+    static func cleanupLegacyFallbackIfNeeded(using dependencies: TokenmonLaunchAtLoginDependencies = .live()) -> Bool {
+        guard dependencies.fallbackPolicy.allowsLegacyFallback == false else {
+            return false
+        }
+
+        let fallbackAgent = TokenmonLaunchAtLoginFallbackAgent(dependencies: dependencies)
+        guard fallbackAgent.isPresent else {
+            return false
+        }
+
+        do {
+            try fallbackAgent.disableIfPresent()
+            logInfo(
+                dependencies: dependencies,
+                event: "launch_at_login_legacy_launch_agent_removed"
+            )
+            return true
+        } catch {
+            logError(
+                dependencies: dependencies,
+                event: "launch_at_login_legacy_launch_agent_removal_failed",
+                metadata: ["error": error.localizedDescription]
+            )
+            return false
+        }
+    }
+
     private static func isSupportedEnvironment(bundle: Bundle) -> Bool {
         let bundleURL = bundle.bundleURL
         return bundleURL.pathExtension.lowercased() == "app" && bundle.bundleIdentifier != nil
+    }
+
+    private static func logDebug(
+        dependencies: TokenmonLaunchAtLoginDependencies,
+        event: String,
+        metadata: [String: String] = [:]
+    ) {
+        TokenmonAppBehaviorLogger.debug(
+            category: "launch_at_login",
+            event: event,
+            metadata: metadata,
+            supportDirectoryPath: dependencies.supportDirectoryPath
+        )
+    }
+
+    private static func logInfo(
+        dependencies: TokenmonLaunchAtLoginDependencies,
+        event: String,
+        metadata: [String: String] = [:]
+    ) {
+        TokenmonAppBehaviorLogger.info(
+            category: "launch_at_login",
+            event: event,
+            metadata: metadata,
+            supportDirectoryPath: dependencies.supportDirectoryPath
+        )
+    }
+
+    private static func logError(
+        dependencies: TokenmonLaunchAtLoginDependencies,
+        event: String,
+        metadata: [String: String] = [:]
+    ) {
+        TokenmonAppBehaviorLogger.error(
+            category: "launch_at_login",
+            event: event,
+            metadata: metadata,
+            supportDirectoryPath: dependencies.supportDirectoryPath
+        )
     }
 }
 
@@ -1626,6 +1773,10 @@ private struct TokenmonLaunchAtLoginFallbackAgent {
         }
 
         return configuredBundlePath == bundleURL.path
+    }
+
+    var isPresent: Bool {
+        fileManager.fileExists(atPath: plistURL.path)
     }
 
     func setEnabled(_ enabled: Bool) throws {
@@ -1772,6 +1923,34 @@ private struct TokenmonLaunchAtLoginFallbackAgent {
         }
 
         return contentsDirectoryURL.deletingLastPathComponent().standardizedFileURL.path
+    }
+}
+
+private extension TokenmonLaunchAtLoginNativeStatus {
+    var logLabel: String {
+        switch self {
+        case .enabled:
+            return "enabled"
+        case .requiresApproval:
+            return "requires_approval"
+        case .notRegistered:
+            return "not_registered"
+        case .notFound:
+            return "not_found"
+        case .statusUnavailable:
+            return "status_unavailable"
+        }
+    }
+}
+
+private extension TokenmonLaunchAtLoginFallbackPolicy {
+    var logLabel: String {
+        switch self {
+        case .nativeOnly:
+            return "native_only"
+        case .developmentFallbackAllowed:
+            return "development_fallback_allowed"
+        }
     }
 }
 

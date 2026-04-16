@@ -2411,6 +2411,82 @@ struct TokenmonPresentationTests {
     }
 
     @Test
+    func launchAtLoginReleasePathDoesNotWriteFallbackLaunchAgent() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let fakeHome = directory.appendingPathComponent("fake-home", isDirectory: true)
+        try FileManager.default.createDirectory(at: fakeHome, withIntermediateDirectories: true)
+        let bundle = try makeFakeAppBundle(
+            appURL: fakeHome.appendingPathComponent("Applications/Tokenmon.app", isDirectory: true)
+        )
+        let dependencies = TokenmonLaunchAtLoginDependencies(
+            bundle: bundle,
+            fileManager: .default,
+            homeDirectory: fakeHome,
+            nativeStatusProvider: { .notFound },
+            nativeSetter: { _ in },
+            fallbackPolicy: .nativeOnly,
+            supportDirectoryPath: directory.path
+        )
+        let plistURL = fakeHome
+            .appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+            .appendingPathComponent("com.aroido.tokenmon.launch-at-login.plist", isDirectory: false)
+
+        let state = try TokenmonLaunchAtLoginController.setEnabled(true, using: dependencies)
+        #expect(state.isSupported == false)
+        #expect(state.reason == TokenmonL10n.string("settings.launch_at_login.reason.status_unavailable"))
+        #expect(FileManager.default.fileExists(atPath: plistURL.path) == false)
+    }
+
+    @Test
+    func launchAtLoginReleaseSnapshotRemovesLegacyLaunchAgent() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let fakeHome = directory.appendingPathComponent("fake-home", isDirectory: true)
+        try FileManager.default.createDirectory(at: fakeHome, withIntermediateDirectories: true)
+        let bundle = try makeFakeAppBundle(
+            appURL: fakeHome.appendingPathComponent("Applications/Tokenmon.app", isDirectory: true)
+        )
+        let dependencies = TokenmonLaunchAtLoginDependencies(
+            bundle: bundle,
+            fileManager: .default,
+            homeDirectory: fakeHome,
+            nativeStatusProvider: { .statusUnavailable },
+            nativeSetter: { _ in },
+            fallbackPolicy: .nativeOnly,
+            supportDirectoryPath: directory.path
+        )
+        let plistURL = fakeHome
+            .appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+            .appendingPathComponent("com.aroido.tokenmon.launch-at-login.plist", isDirectory: false)
+
+        try FileManager.default.createDirectory(
+            at: plistURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let legacyPayload: [String: Any] = [
+            "Label": "com.aroido.tokenmon.launch-at-login",
+            "LimitLoadToSessionType": ["Aqua"],
+            "ProcessType": "Interactive",
+            "ProgramArguments": ["/usr/bin/open", "-g", bundle.bundleURL.standardizedFileURL.path],
+            "RunAtLoad": true,
+        ]
+        let legacyData = try PropertyListSerialization.data(
+            fromPropertyList: legacyPayload,
+            format: .xml,
+            options: 0
+        )
+        try legacyData.write(to: plistURL, options: .atomic)
+
+        let state = TokenmonLaunchAtLoginController.snapshot(using: dependencies)
+        #expect(state.isSupported == false)
+        #expect(state.reason == TokenmonL10n.string("settings.launch_at_login.reason.status_unavailable"))
+        #expect(FileManager.default.fileExists(atPath: plistURL.path) == false)
+    }
+
+    @Test
     func hotPathRefreshSkipsProviderInspectionUntilSettingsSurfaceOpens() async throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -2513,6 +2589,18 @@ struct TokenmonPresentationTests {
 
         await model.waitForRefreshToFinish()
         #expect(model.notificationAuthorizationState == .denied)
+    }
+
+    @Test
+    func freshInstallsDefaultCaptureNotificationsToOff() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let databasePath = directory.appendingPathComponent("tokenmon.sqlite").path
+        let manager = TokenmonDatabaseManager(path: databasePath)
+        try manager.bootstrap()
+
+        #expect(try manager.appSettings().notificationsEnabled == false)
     }
 
     @Test
@@ -2959,6 +3047,105 @@ struct TokenmonPresentationTests {
                 "x-apple.systempreferences:",
             ]
         )
+    }
+
+    @Test
+    func notificationSettingsDestinationsCarryStructuredResults() {
+        let destinations = TokenmonSystemSettingsOpener.notificationSettingsDestinations(
+            bundleIdentifier: "com.aroido.tokenmon"
+        )
+
+        #expect(
+            destinations.map(\.result) == [
+                .openedAppSpecific,
+                .openedAppSpecific,
+                .openedGenericNotifications,
+                .openedGenericNotifications,
+                .openedSystemSettingsRoot,
+            ]
+        )
+    }
+
+    @Test
+    func notificationSettingsOpenerReturnsMatchingResult() {
+        let result = TokenmonSystemSettingsOpener.openNotificationSettings(
+            bundleIdentifier: "com.aroido.tokenmon",
+            openURL: { url in
+                url.absoluteString == "x-apple.systempreferences:com.apple.preference.notifications"
+            }
+        )
+
+        #expect(result == .openedGenericNotifications)
+    }
+
+    @Test
+    func notificationSettingsOpenerReturnsAppSpecificResult() {
+        let result = TokenmonSystemSettingsOpener.openNotificationSettings(
+            bundleIdentifier: "com.aroido.tokenmon",
+            openURL: { url in
+                url.absoluteString == "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=com.aroido.tokenmon"
+            }
+        )
+
+        #expect(result == .openedAppSpecific)
+    }
+
+    @Test
+    func notificationSettingsOpenerReturnsFailureWhenNoDestinationOpens() {
+        let result = TokenmonSystemSettingsOpener.openNotificationSettings(
+            bundleIdentifier: "com.aroido.tokenmon",
+            openURL: { _ in false }
+        )
+
+        #expect(result == .failed)
+    }
+
+    @Test
+    func openSystemNotificationSettingsUsesStructuredSuccessMessages() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let databasePath = directory.appendingPathComponent("tokenmon.sqlite").path
+        let manager = TokenmonDatabaseManager(path: databasePath)
+        try manager.bootstrap()
+
+        let model = TokenmonMenuModel(
+            databasePath: databasePath,
+            providerInspector: { _, _, _ in [] },
+            launchAtLoginStateProvider: { .unsupported(reason: "tests") },
+            notificationSettingsOpener: { .openedGenericNotifications }
+        )
+
+        await model.waitForRefreshToFinish()
+        model.openSystemNotificationSettings()
+
+        #expect(
+            model.settingsMessage == TokenmonL10n.string("settings.feedback.opened_notification_settings_generic")
+        )
+        #expect(model.settingsError == nil)
+    }
+
+    @Test
+    func openSystemNotificationSettingsUsesFailureMessageWhenOpenFails() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let databasePath = directory.appendingPathComponent("tokenmon.sqlite").path
+        let manager = TokenmonDatabaseManager(path: databasePath)
+        try manager.bootstrap()
+
+        let model = TokenmonMenuModel(
+            databasePath: databasePath,
+            providerInspector: { _, _, _ in [] },
+            launchAtLoginStateProvider: { .unsupported(reason: "tests") },
+            notificationSettingsOpener: { .failed }
+        )
+
+        await model.waitForRefreshToFinish()
+        model.openSystemNotificationSettings()
+
+        #expect(model.settingsMessage == nil)
+        #expect(model.settingsError == TokenmonL10n.string("settings.feedback.failed_notification_settings"))
     }
 
     @Test

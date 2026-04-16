@@ -144,7 +144,7 @@ final class TokenmonCaptureNotificationCoordinator: NSObject, TokenmonCaptureNot
             return
         }
 
-        ensureAuthorization(promptIfNeeded: true) { [weak self] authorized in
+        ensureAuthorization(promptIfNeeded: false) { [weak self] authorized in
             guard let self, authorized else {
                 return
             }
@@ -174,13 +174,13 @@ final class TokenmonCaptureNotificationCoordinator: NSObject, TokenmonCaptureNot
             Task { @MainActor in
                 if authorized {
                     completion(
-                        "Capture alerts enabled. Tokenmon only notifies when a species is captured.",
+                        TokenmonL10n.string("settings.feedback.capture_notifications_enabled"),
                         nil
                     )
                 } else {
                     completion(
                         nil,
-                        "Tokenmon notifications are off in System Settings. Enable notifications there to receive capture alerts."
+                        TokenmonL10n.string("settings.feedback.capture_notifications_denied")
                     )
                 }
             }
@@ -194,7 +194,7 @@ final class TokenmonCaptureNotificationCoordinator: NSObject, TokenmonCaptureNot
         subtitle: String,
         completion: @escaping @MainActor (_ message: String?, _ error: String?) -> Void
     ) {
-        ensureAuthorization(promptIfNeeded: true) { [weak self] authorized in
+        ensureAuthorization(promptIfNeeded: false) { [weak self] authorized in
             guard let self else {
                 return
             }
@@ -211,7 +211,7 @@ final class TokenmonCaptureNotificationCoordinator: NSObject, TokenmonCaptureNot
                     )
                     completion(
                         nil,
-                        "Tokenmon notifications are off in System Settings. Enable notifications there to preview capture alerts."
+                        TokenmonL10n.string("settings.feedback.preview_alert_notifications_unavailable")
                     )
                     return
                 }
@@ -244,7 +244,7 @@ final class TokenmonCaptureNotificationCoordinator: NSObject, TokenmonCaptureNot
                         )
                         self.prepareForBackgroundPreview()
                         completion(
-                            "Capture alert preview scheduled. Tokenmon will briefly move to the background so the macOS banner can appear.",
+                            TokenmonL10n.string("settings.feedback.preview_alert_scheduled"),
                             nil
                         )
                     }

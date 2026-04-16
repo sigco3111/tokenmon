@@ -333,7 +333,7 @@
 "settings.general.section.notifications" = "알림";
 "settings.general.toggle.notify_on_capture" = "포획 시 알림";
 "settings.general.open_notification_settings" = "macOS 알림 설정 열기";
-"settings.general.notifications.note" = "이 옵션을 켜면 처음 한 번 macOS 알림 권한을 요청합니다. Tokenmon은 종을 포획했을 때만 알림을 보내며, 알림을 클릭하면 해당 Dex 항목이 열립니다.";
+"settings.general.notifications.note" = "이 옵션을 켜면 그때 macOS 알림 권한을 요청합니다. Tokenmon은 종을 포획했을 때만 알림을 보내며, 알림을 클릭하면 해당 Dex 항목이 열립니다.";
 "settings.general.section.analytics" = "개인정보 및 분석";
 "settings.general.toggle.usage_analytics" = "익명 사용 분석 공유";
 "settings.general.analytics.note" = "분석은 직접 켜기 전까지 꺼져 있습니다. Tokenmon은 앱 실행, 프로바이더 설정, 조우, 포획, 업데이트 흐름 같은 익명 제품 이벤트만 기록합니다. 프롬프트 본문, 모델 출력, transcript 경로, 작업 내용은 보내지 않습니다.";
@@ -361,7 +361,7 @@
 "settings.updates.unavailable.note" = "대개 소스 워크스페이스 빌드이거나 릴리스 서명 구성이 끝나지 않은 경우입니다. 배포용 Tokenmon 앱 번들에서는 자동 업데이트가 활성화됩니다.";
 
 "settings.notifications.status.checking" = "Tokenmon의 현재 macOS 알림 상태를 확인하는 중입니다.";
-"settings.notifications.status.not_determined" = "macOS가 아직 Tokenmon에 알림 권한을 주지 않아 알림 목록에 이 앱이 보이지 않을 수 있습니다.";
+"settings.notifications.status.not_determined" = "Tokenmon이 아직 macOS 알림 권한을 요청하지 않았습니다. 포획 시 알림을 켜면 권한을 요청합니다.";
 "settings.notifications.status.denied" = "macOS에서 Tokenmon 알림이 꺼져 있습니다. 이 앱에 대한 알림을 허용하려면 macOS 알림 설정을 여세요.";
 "settings.notifications.status.authorized_with_sound" = "Tokenmon에 대한 macOS 알림이 활성화되어 있으며, 소리도 켜져 있고, %1$@.";
 "settings.notifications.status.authorized_without_sound" = "Tokenmon에 대한 macOS 알림이 활성화되어 있고 %1$@, 현재 소리는 꺼져 있습니다.";
@@ -373,13 +373,17 @@
 
 "settings.launch_at_login.reason.installed_only" = "로그인 시 실행은 설치된 앱 번들에서만 사용할 수 있습니다.";
 "settings.launch_at_login.reason.enabled" = "로그인 시 실행이 켜져 있습니다.";
-"settings.launch_at_login.reason.requires_approval" = "로그인 시 실행에는 시스템 설정에서의 승인이 필요합니다.";
+"settings.launch_at_login.reason.requires_approval" = "로그인 시 실행에는 시스템 설정 > 일반 > 로그인 항목에서의 승인이 필요합니다.";
 "settings.launch_at_login.reason.disabled" = "로그인 시 실행이 꺼져 있습니다.";
 "settings.launch_at_login.reason.unavailable" = "이 빌드에서는 로그인 시 실행을 사용할 수 없습니다.";
-"settings.launch_at_login.reason.status_unavailable" = "로그인 시 실행 상태를 확인할 수 없습니다.";
+"settings.launch_at_login.reason.status_unavailable" = "이 설치에서 로그인 시 실행 등록 상태를 확인할 수 없습니다.";
 
 "settings.feedback.opened_notification_settings" = "Tokenmon용 macOS 알림 설정을 열었습니다.";
+"settings.feedback.opened_notification_settings_generic" = "macOS 알림 설정을 열었습니다.";
+"settings.feedback.opened_system_settings" = "시스템 설정을 열었습니다.";
 "settings.feedback.failed_notification_settings" = "macOS 알림 설정을 열지 못했습니다.";
+"settings.feedback.capture_notifications_enabled" = "포획 알림이 켜졌습니다. Tokenmon은 종을 포획했을 때만 알림을 보냅니다.";
+"settings.feedback.capture_notifications_denied" = "macOS에서 Tokenmon 알림이 꺼져 있습니다. 포획 알림을 허용하려면 알림 설정을 여세요.";
 "settings.feedback.redetected_providers" = "Tokenmon이 로컬 프로바이더 설치를 다시 스캔했습니다.";
 "settings.feedback.reset_progress" = "진행도가 초기화되었습니다. Tokenmon은 이 시점 이후 관찰된 토큰 증가만 집계합니다.";
 "settings.feedback.reset_dex" = "Dex 진행도가 초기화되었습니다. 조우 이력과 토큰 합계는 유지되었습니다.";
@@ -389,6 +393,8 @@
 "settings.feedback.totals_override" = "조우 합계 오버라이드를 적용했습니다.";
 "settings.feedback.forged_encounter" = "%1$@ %2$@ 조우를 생성했습니다.";
 "settings.feedback.preview_alert_missing_species" = "미리보기 알림용 종 %1$@을(를) 찾지 못했습니다.";
+"settings.feedback.preview_alert_notifications_unavailable" = "macOS에서 Tokenmon 알림이 꺼져 있습니다. 미리보기 전에 설정에서 알림을 허용하세요.";
+"settings.feedback.preview_alert_scheduled" = "포획 알림 미리보기를 예약했습니다. macOS 배너가 보이도록 Tokenmon을 잠시 백그라운드로 보냅니다.";
 "settings.feedback.rerun_bootstrap" = "Tokenmon이 로컬 저장소를 새로 고치고 프로바이더 inbox 파일을 다시 불러왔습니다.";
 "settings.feedback.reseed_species" = "종 카탈로그를 다시 적용했습니다. 총 %1$d종, 신규 삽입 %2$d종입니다.";
 "settings.feedback.rescan_inbox" = "Tokenmon이 로컬 inbox 파일을 다시 재생하고 런타임 상태를 갱신했습니다.";
