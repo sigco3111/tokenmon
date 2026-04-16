@@ -1538,11 +1538,13 @@ enum TokenmonLaunchAtLoginController {
             )
         case .notFound, .statusUnavailable:
             if fallbackAgent.isSupported {
+                try? fallbackAgent.migrateIfNeeded()
+                let isEnabled = fallbackAgent.isEnabled
                 return TokenmonLaunchAtLoginState(
                     isSupported: true,
-                    isEnabled: fallbackAgent.isEnabled,
+                    isEnabled: isEnabled,
                     reason: TokenmonL10n.string(
-                        fallbackAgent.isEnabled
+                        isEnabled
                             ? "settings.launch_at_login.reason.enabled"
                             : "settings.launch_at_login.reason.disabled"
                     )
@@ -1595,12 +1597,14 @@ enum TokenmonLaunchAtLoginController {
 private struct TokenmonLaunchAtLoginFallbackAgent {
     private let bundleURL: URL
     private let bundleIdentifier: String
+    private let executableURL: URL
     private let fileManager: FileManager
     private let homeDirectory: URL
 
     init(dependencies: TokenmonLaunchAtLoginDependencies) {
         bundleURL = dependencies.bundle.bundleURL.standardizedFileURL
         bundleIdentifier = dependencies.bundle.bundleIdentifier ?? "com.aroido.tokenmon"
+        executableURL = Self.resolveExecutableURL(for: dependencies.bundle)
         fileManager = dependencies.fileManager
         homeDirectory = dependencies.homeDirectory.standardizedFileURL
     }
@@ -1640,17 +1644,57 @@ private struct TokenmonLaunchAtLoginFallbackAgent {
         try fileManager.removeItem(at: plistURL)
     }
 
+    func migrateIfNeeded() throws {
+        guard needsMigration else {
+            return
+        }
+
+        try writePlist()
+    }
+
     private var configuredBundlePath: String? {
         guard
-            let data = try? Data(contentsOf: plistURL),
-            let payload = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
-            let arguments = payload["ProgramArguments"] as? [String],
-            let configuredPath = arguments.last
+            let arguments = configuredProgramArguments,
+            let configuredPath = Self.bundlePath(fromProgramArguments: arguments)
         else {
             return nil
         }
 
-        return URL(fileURLWithPath: configuredPath).standardizedFileURL.path
+        return configuredPath
+    }
+
+    private var configuredProgramArguments: [String]? {
+        configuredPayload?["ProgramArguments"] as? [String]
+    }
+
+    private var configuredAssociatedBundleIdentifiers: [String]? {
+        configuredPayload?["AssociatedBundleIdentifiers"] as? [String]
+    }
+
+    private var configuredPayload: [String: Any]? {
+        guard
+            let data = try? Data(contentsOf: plistURL),
+            let payload = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+        else {
+            return nil
+        }
+
+        return payload
+    }
+
+    private var desiredProgramArguments: [String] {
+        [executableURL.path]
+    }
+
+    private var desiredAssociatedBundleIdentifiers: [String] {
+        [bundleIdentifier]
+    }
+
+    private var needsMigration: Bool {
+        configuredBundlePath == bundleURL.path && (
+            configuredProgramArguments != desiredProgramArguments ||
+                configuredAssociatedBundleIdentifiers != desiredAssociatedBundleIdentifiers
+        )
     }
 
     private func writePlist() throws {
@@ -1664,10 +1708,11 @@ private struct TokenmonLaunchAtLoginFallbackAgent {
         )
 
         let payload: [String: Any] = [
+            "AssociatedBundleIdentifiers": desiredAssociatedBundleIdentifiers,
             "Label": label,
             "LimitLoadToSessionType": ["Aqua"],
             "ProcessType": "Interactive",
-            "ProgramArguments": ["/usr/bin/open", "-g", bundleURL.path],
+            "ProgramArguments": desiredProgramArguments,
             "RunAtLoad": true,
         ]
         let data = try PropertyListSerialization.data(
@@ -1687,6 +1732,46 @@ private struct TokenmonLaunchAtLoginFallbackAgent {
             .appendingPathComponent("Library", isDirectory: true)
             .appendingPathComponent("LaunchAgents", isDirectory: true)
             .appendingPathComponent("\(label).plist", isDirectory: false)
+    }
+
+    private static func resolveExecutableURL(for bundle: Bundle) -> URL {
+        if let executableURL = bundle.executableURL {
+            return executableURL.standardizedFileURL
+        }
+
+        let executableName = (bundle.object(forInfoDictionaryKey: "CFBundleExecutable") as? String)
+            ?? bundle.bundleURL.deletingPathExtension().lastPathComponent
+        return bundle.bundleURL
+            .appendingPathComponent("Contents", isDirectory: true)
+            .appendingPathComponent("MacOS", isDirectory: true)
+            .appendingPathComponent(executableName, isDirectory: false)
+            .standardizedFileURL
+    }
+
+    private static func bundlePath(fromProgramArguments arguments: [String]) -> String? {
+        guard let firstArgument = arguments.first else {
+            return nil
+        }
+
+        let firstURL = URL(fileURLWithPath: firstArgument).standardizedFileURL
+        if firstURL.path == "/usr/bin/open" {
+            guard let configuredPath = arguments.last else {
+                return nil
+            }
+
+            return URL(fileURLWithPath: configuredPath).standardizedFileURL.path
+        }
+
+        let macOSDirectoryURL = firstURL.deletingLastPathComponent()
+        let contentsDirectoryURL = macOSDirectoryURL.deletingLastPathComponent()
+        guard
+            macOSDirectoryURL.lastPathComponent == "MacOS",
+            contentsDirectoryURL.lastPathComponent == "Contents"
+        else {
+            return nil
+        }
+
+        return contentsDirectoryURL.deletingLastPathComponent().standardizedFileURL.path
     }
 }
 

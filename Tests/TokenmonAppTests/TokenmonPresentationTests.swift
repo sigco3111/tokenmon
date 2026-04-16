@@ -2320,12 +2320,69 @@ struct TokenmonPresentationTests {
             format: nil
         ) as? [String: Any]
         let arguments = payload?["ProgramArguments"] as? [String]
-        #expect(arguments == ["/usr/bin/open", "-g", bundle.bundleURL.standardizedFileURL.path])
+        let associatedBundleIdentifiers = payload?["AssociatedBundleIdentifiers"] as? [String]
+        let expectedExecutablePath = try #require(bundle.executableURL?.standardizedFileURL.path)
+        #expect(arguments == [expectedExecutablePath])
+        #expect(associatedBundleIdentifiers == ["com.aroido.tokenmon"])
 
         let disabledState = try TokenmonLaunchAtLoginController.setEnabled(false, using: dependencies)
         #expect(disabledState.isSupported)
         #expect(disabledState.isEnabled == false)
         #expect(FileManager.default.fileExists(atPath: plistURL.path) == false)
+    }
+
+    @Test
+    func launchAtLoginFallbackMigratesLegacyOpenLaunchAgent() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let fakeHome = directory.appendingPathComponent("fake-home", isDirectory: true)
+        try FileManager.default.createDirectory(at: fakeHome, withIntermediateDirectories: true)
+        let bundle = try makeFakeAppBundle(
+            appURL: fakeHome.appendingPathComponent("Applications/Tokenmon.app", isDirectory: true)
+        )
+        let dependencies = TokenmonLaunchAtLoginDependencies(
+            bundle: bundle,
+            fileManager: .default,
+            homeDirectory: fakeHome,
+            nativeStatusProvider: { .notFound },
+            nativeSetter: { _ in }
+        )
+        let plistURL = fakeHome
+            .appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+            .appendingPathComponent("com.aroido.tokenmon.launch-at-login.plist", isDirectory: false)
+
+        try FileManager.default.createDirectory(
+            at: plistURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let legacyPayload: [String: Any] = [
+            "Label": "com.aroido.tokenmon.launch-at-login",
+            "LimitLoadToSessionType": ["Aqua"],
+            "ProcessType": "Interactive",
+            "ProgramArguments": ["/usr/bin/open", "-g", bundle.bundleURL.standardizedFileURL.path],
+            "RunAtLoad": true,
+        ]
+        let legacyData = try PropertyListSerialization.data(
+            fromPropertyList: legacyPayload,
+            format: .xml,
+            options: 0
+        )
+        try legacyData.write(to: plistURL, options: .atomic)
+
+        let state = TokenmonLaunchAtLoginController.snapshot(using: dependencies)
+        #expect(state.isSupported)
+        #expect(state.isEnabled)
+
+        let payload = try PropertyListSerialization.propertyList(
+            from: Data(contentsOf: plistURL),
+            format: nil
+        ) as? [String: Any]
+        let arguments = payload?["ProgramArguments"] as? [String]
+        let associatedBundleIdentifiers = payload?["AssociatedBundleIdentifiers"] as? [String]
+        let expectedExecutablePath = try #require(bundle.executableURL?.standardizedFileURL.path)
+        #expect(arguments == [expectedExecutablePath])
+        #expect(associatedBundleIdentifiers == ["com.aroido.tokenmon"])
     }
 
     @Test
@@ -3244,9 +3301,12 @@ struct TokenmonPresentationTests {
     private func makeFakeAppBundle(appURL: URL) throws -> Bundle {
         let contentsURL = appURL.appendingPathComponent("Contents", isDirectory: true)
         try FileManager.default.createDirectory(at: contentsURL, withIntermediateDirectories: true)
+        let macOSURL = contentsURL.appendingPathComponent("MacOS", isDirectory: true)
+        try FileManager.default.createDirectory(at: macOSURL, withIntermediateDirectories: true)
 
         let infoPlistURL = contentsURL.appendingPathComponent("Info.plist", isDirectory: false)
         let payload: [String: Any] = [
+            "CFBundleExecutable": "TokenmonApp",
             "CFBundleIdentifier": "com.aroido.tokenmon",
             "CFBundleName": "Tokenmon",
             "CFBundlePackageType": "APPL",
@@ -3257,6 +3317,12 @@ struct TokenmonPresentationTests {
             options: 0
         )
         try data.write(to: infoPlistURL, options: .atomic)
+        let executableURL = macOSURL.appendingPathComponent("TokenmonApp", isDirectory: false)
+        FileManager.default.createFile(atPath: executableURL.path, contents: Data())
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: executableURL.path
+        )
 
         guard let bundle = Bundle(url: appURL) else {
             throw NSError(domain: "TokenmonPresentationTests", code: 1)
