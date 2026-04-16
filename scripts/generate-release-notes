@@ -1,0 +1,384 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PLIST_TEMPLATE="$ROOT/Packaging/Tokenmon-Info.plist"
+
+tag=""
+version=""
+repo=""
+previous_tag=""
+target_commitish=""
+markdown_output=""
+sparkle_output=""
+title_output=""
+config_path=".github/release.yml"
+english_markdown_output=""
+korean_markdown_output=""
+english_text_output=""
+korean_text_output=""
+korean_title_output=""
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./scripts/generate-release-notes [options]
+
+Options:
+  --tag <vX.Y.Z>              Release tag to generate notes for.
+  --version <X.Y.Z>           Release version. Used to derive --tag when omitted.
+  --repo <owner/name>         GitHub repository. Defaults to Packaging/Tokenmon-Info.plist.
+  --previous-tag <tag>        Explicit previous tag. Auto-detected when omitted.
+  --target <ref>              Target commitish for GitHub's generate-notes API.
+  --markdown-output <path>    Markdown release notes output path.
+  --sparkle-output <path>     Plain-text Sparkle/appcast release notes output path.
+  --title-output <path>       Release title output path.
+  --config <path>             Release notes config path for GitHub API.
+  -h, --help                  Show help.
+
+If GitHub release-note generation is unavailable, the script falls back to a
+local git-log summary so release automation still produces usable notes.
+
+The script always writes:
+- combined markdown/text outputs
+- English companion files
+- Korean companion files
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --tag)
+      shift
+      tag="${1:-}"
+      ;;
+    --version)
+      shift
+      version="${1:-}"
+      ;;
+    --repo)
+      shift
+      repo="${1:-}"
+      ;;
+    --previous-tag)
+      shift
+      previous_tag="${1:-}"
+      ;;
+    --target)
+      shift
+      target_commitish="${1:-}"
+      ;;
+    --markdown-output)
+      shift
+      markdown_output="${1:-}"
+      ;;
+    --sparkle-output)
+      shift
+      sparkle_output="${1:-}"
+      ;;
+    --title-output)
+      shift
+      title_output="${1:-}"
+      ;;
+    --config)
+      shift
+      config_path="${1:-}"
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      printf 'Unsupported argument: %s\n' "$1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift || true
+done
+
+resolve_repo() {
+  if [[ -n "$repo" ]]; then
+    printf '%s\n' "$repo"
+    return
+  fi
+
+  /usr/libexec/PlistBuddy -c 'Print :TokenmonGitHubRepository' "$PLIST_TEMPLATE"
+}
+
+resolve_version() {
+  if [[ -n "$version" ]]; then
+    printf '%s\n' "$version"
+    return
+  fi
+
+  if [[ -n "$tag" ]]; then
+    printf '%s\n' "${tag#v}"
+    return
+  fi
+
+  /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST_TEMPLATE"
+}
+
+resolve_tag() {
+  if [[ -n "$tag" ]]; then
+    printf '%s\n' "$tag"
+    return
+  fi
+
+  printf 'v%s\n' "$version"
+}
+
+find_previous_tag() {
+  if [[ -n "$previous_tag" ]]; then
+    printf '%s\n' "$previous_tag"
+    return
+  fi
+
+  if git rev-parse -q --verify "refs/tags/$tag" >/dev/null 2>&1; then
+    git describe --tags --abbrev=0 "$tag^" 2>/dev/null || true
+    return
+  fi
+
+  git tag --list 'v*' --sort=-version:refname | grep -Fxv "$tag" | head -n 1 || true
+}
+
+write_markdown_as_text() {
+  local markdown_path="$1"
+  local output_path="$2"
+
+  python3 - "$markdown_path" "$output_path" <<'PY'
+import pathlib
+import re
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+source = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1 (\2)", source)
+source = source.replace("`", "")
+source = source.replace("**", "")
+source = source.replace("__", "")
+
+lines = []
+for raw_line in source.splitlines():
+    line = raw_line.rstrip()
+    stripped = line.strip()
+    if stripped.startswith("#"):
+        stripped = stripped.lstrip("#").strip()
+    stripped = re.sub(r"^[-*]\s+", "- ", stripped)
+    stripped = re.sub(r"\s+", " ", stripped).strip()
+    if stripped:
+        lines.append(stripped)
+    elif lines and lines[-1] != "":
+        lines.append("")
+
+while lines and lines[-1] == "":
+    lines.pop()
+
+pathlib.Path(sys.argv[2]).write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
+}
+
+generate_github_notes() {
+  local payload_file="$1"
+  GH_PAGER=cat gh api --method POST "repos/$repo/releases/generate-notes" --input "$payload_file"
+}
+
+localize_markdown_to_korean() {
+  local english_input="$1"
+  local korean_output="$2"
+
+  python3 - "$english_input" "$korean_output" <<'PY'
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+mapping = {
+    "What's Changed": "변경 사항",
+    "Full Changelog": "전체 변경 로그",
+    "New Features": "새 기능",
+    "Provider and Ingest": "프로바이더 및 수집",
+    "UI and UX": "UI 및 UX",
+    "Fixes": "수정 사항",
+    "Docs and Workflow": "문서 및 워크플로",
+    "Everything Else": "기타 변경",
+}
+
+lines = []
+inserted_note = False
+for raw_line in source.splitlines():
+    line = raw_line.rstrip("\n")
+    stripped = line.strip()
+    if stripped.startswith("## "):
+        heading = stripped[3:]
+        translated = mapping.get(heading, heading)
+        if not inserted_note:
+            lines.append("> 참고: 세부 항목과 PR 제목은 정확성을 위해 원문 표현을 유지할 수 있습니다.")
+            lines.append("")
+            inserted_note = True
+        lines.append(f"## {translated}")
+    else:
+        lines.append(line)
+
+if not inserted_note:
+    lines.insert(0, "")
+    lines.insert(0, "> 참고: 세부 항목과 PR 제목은 정확성을 위해 원문 표현을 유지할 수 있습니다.")
+
+pathlib.Path(sys.argv[2]).write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+PY
+}
+
+combine_markdown() {
+  local english_input="$1"
+  local korean_input="$2"
+  local combined_output="$3"
+
+  {
+    printf '# English\n\n'
+    cat "$english_input"
+    printf '\n---\n\n# 한국어\n\n'
+    cat "$korean_input"
+  } >"$combined_output"
+}
+
+combine_text() {
+  local english_input="$1"
+  local korean_input="$2"
+  local combined_output="$3"
+
+  {
+    printf 'English\n\n'
+    cat "$english_input"
+    printf '\n----\n\n'
+    printf '한국어\n\n'
+    cat "$korean_input"
+  } >"$combined_output"
+}
+
+build_payload_file() {
+  local payload_file="$1"
+
+  python3 - "$payload_file" "$tag" "$target_commitish" "$previous_tag" "$config_path" <<'PY'
+import json
+import pathlib
+import sys
+
+payload_path = pathlib.Path(sys.argv[1])
+tag = sys.argv[2]
+target = sys.argv[3]
+previous = sys.argv[4]
+config = sys.argv[5]
+
+payload = {"tag_name": tag}
+if target:
+    payload["target_commitish"] = target
+if previous:
+    payload["previous_tag_name"] = previous
+if config and pathlib.Path(config).exists():
+    payload["configuration_file_path"] = config
+
+payload_path.write_text(json.dumps(payload), encoding="utf-8")
+PY
+}
+
+fallback_markdown() {
+  local output_path="$1"
+  local compare_target="HEAD"
+  local range=""
+  local compare_url=""
+  local commit_lines=""
+
+  if git rev-parse -q --verify "refs/tags/$tag" >/dev/null 2>&1; then
+    compare_target="$tag"
+  fi
+
+  if [[ -n "$previous_tag" ]]; then
+    range="$previous_tag..$compare_target"
+    compare_url="https://github.com/$repo/compare/$previous_tag...$tag"
+  else
+    range="$compare_target"
+  fi
+
+  commit_lines="$(git log --no-merges --pretty=format:'- %s (%h)' "$range" 2>/dev/null | head -n 12 || true)"
+
+  if [[ -z "$commit_lines" ]]; then
+    commit_lines='- Packaging, metadata, and release automation refresh.'
+  fi
+
+  {
+    printf '## What'"'"'s Changed\n\n'
+    printf '%s\n' "$commit_lines"
+    if [[ -n "$compare_url" ]]; then
+      printf '\n## Full Changelog\n\n- %s\n' "$compare_url"
+    fi
+  } >"$output_path"
+}
+
+repo="$(resolve_repo)"
+version="$(resolve_version)"
+tag="$(resolve_tag)"
+previous_tag="$(find_previous_tag)"
+
+if [[ -z "$target_commitish" ]]; then
+  target_commitish="$(git rev-parse HEAD 2>/dev/null || true)"
+fi
+
+markdown_output="${markdown_output:-$ROOT/dist/releases/RELEASE_NOTES.md}"
+sparkle_output="${sparkle_output:-$ROOT/dist/releases/RELEASE_NOTES.txt}"
+title_output="${title_output:-$ROOT/dist/releases/RELEASE_TITLE.txt}"
+
+mkdir -p "$(dirname "$markdown_output")" "$(dirname "$sparkle_output")" "$(dirname "$title_output")"
+
+english_markdown_output="${markdown_output%.md}.en.md"
+korean_markdown_output="${markdown_output%.md}.ko.md"
+english_text_output="${sparkle_output%.txt}.en.txt"
+korean_text_output="${sparkle_output%.txt}.ko.txt"
+korean_title_output="${title_output}.ko"
+
+release_title="Tokenmon $tag"
+release_title_ko="토큰몬 $tag 릴리즈"
+release_notes_source="git_fallback"
+
+if command -v gh >/dev/null 2>&1; then
+  if [[ -n "${GH_TOKEN:-}" || -n "${GITHUB_TOKEN:-}" ]] || gh auth status >/dev/null 2>&1; then
+    payload_file="$(mktemp)"
+    trap 'rm -f "$payload_file"' EXIT
+    build_payload_file "$payload_file"
+
+    if github_json="$(generate_github_notes "$payload_file" 2>/dev/null)"; then
+      generated_title="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("name","").strip())' <<<"$github_json")"
+      generated_body="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("body","").rstrip())' <<<"$github_json")"
+      if [[ -n "$generated_body" ]]; then
+        release_title="${generated_title:-Tokenmon $tag}"
+        printf '%s\n' "$generated_body" >"$english_markdown_output"
+        release_notes_source="github_api"
+      fi
+    fi
+  fi
+fi
+
+if [[ "$release_notes_source" == "git_fallback" ]]; then
+  fallback_markdown "$english_markdown_output"
+fi
+
+printf '%s\n' "$release_title" >"$title_output"
+printf '%s\n' "$release_title_ko" >"$korean_title_output"
+
+localize_markdown_to_korean "$english_markdown_output" "$korean_markdown_output"
+combine_markdown "$english_markdown_output" "$korean_markdown_output" "$markdown_output"
+
+write_markdown_as_text "$english_markdown_output" "$english_text_output"
+write_markdown_as_text "$korean_markdown_output" "$korean_text_output"
+combine_text "$english_text_output" "$korean_text_output" "$sparkle_output"
+
+printf 'release_notes_source=%s\n' "$release_notes_source"
+printf 'release_title=%s\n' "$release_title"
+printf 'release_title_ko=%s\n' "$release_title_ko"
+printf 'previous_tag=%s\n' "${previous_tag:-none}"
+printf 'markdown_output=%s\n' "$markdown_output"
+printf 'english_markdown_output=%s\n' "$english_markdown_output"
+printf 'korean_markdown_output=%s\n' "$korean_markdown_output"
+printf 'sparkle_output=%s\n' "$sparkle_output"
+printf 'english_text_output=%s\n' "$english_text_output"
+printf 'korean_text_output=%s\n' "$korean_text_output"
+printf 'title_output=%s\n' "$title_output"
+printf 'korean_title_output=%s\n' "$korean_title_output"

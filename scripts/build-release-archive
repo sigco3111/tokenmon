@@ -1,0 +1,407 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PLIST_TEMPLATE="$ROOT/Packaging/Tokenmon-Info.plist"
+OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/dist/releases}"
+APP_NAME="Tokenmon"
+EXECUTABLE_NAME="TokenmonApp"
+BUNDLE_ID="${BUNDLE_ID:-com.aroido.tokenmon}"
+REPOSITORY_TARGET="${TOKENMON_GITHUB_REPOSITORY:-$("$ROOT/scripts/tokenmon-release-targets" repository)}"
+VERSION="${VERSION:-$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST_TEMPLATE")}"
+BUILD_NUMBER="${BUILD_NUMBER:-$(date +%Y%m%d%H%M%S)}"
+APP_BUNDLE="$OUTPUT_DIR/$APP_NAME.app"
+ZIP_NAME="${ZIP_NAME:-$APP_NAME-$VERSION-macos.zip}"
+ZIP_PATH="$OUTPUT_DIR/$ZIP_NAME"
+DMG_NAME="${DMG_NAME:-$APP_NAME-$VERSION.dmg}"
+DMG_PATH="$OUTPUT_DIR/$DMG_NAME"
+SHA256_PATH="$OUTPUT_DIR/SHA256SUMS.txt"
+ALLOW_UNSIGNED="${ALLOW_UNSIGNED:-0}"
+INCLUDE_DEVELOPER_TOOLS=0
+APP_BUNDLE_INPUT=""
+SCRATCH_PATH="${TOKENMON_RELEASE_SCRATCH_PATH:-}"
+TIMING_REPORT="${TOKENMON_TIMING_REPORT:-}"
+REFRESH_README_MEDIA="${TOKENMON_REFRESH_README_MEDIA:-1}"
+README_MEDIA_OUTPUT_DIR="${TOKENMON_README_MEDIA_OUTPUT_DIR:-}"
+
+CERT_PATH=""
+KEYCHAIN_PATH=""
+KEYCHAIN_PASSWORD=""
+NOTARY_KEY_PATH=""
+SIGNING_IDENTITY=""
+typeset -a ORIGINAL_KEYCHAINS
+ORIGINAL_KEYCHAINS=()
+
+timing_now() {
+  python3 - <<'PY'
+import time
+print(f"{time.time():.6f}")
+PY
+}
+
+record_timing() {
+  local category="$1"
+  local step="$2"
+  local started_at="$3"
+  local ended_at
+  local duration
+
+  ended_at="$(timing_now)"
+  duration="$(python3 - "$started_at" "$ended_at" <<'PY'
+import sys
+start = float(sys.argv[1])
+end = float(sys.argv[2])
+print(f"{end - start:.3f}")
+PY
+)"
+
+  printf 'TIMING: category=%s step=%s duration_seconds=%s\n' "$category" "$step" "$duration"
+  if [[ -n "$TIMING_REPORT" ]]; then
+    printf 'category=%s step=%s duration_seconds=%s\n' "$category" "$step" "$duration" >>"$TIMING_REPORT"
+  fi
+}
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./scripts/build-release-archive [--output <path>] [--include-developer-tools] [--app-bundle <path>] [--scratch-path <path>]
+
+Environment:
+  VERSION, BUILD_NUMBER, BUNDLE_ID, TOKENMON_GITHUB_REPOSITORY
+  TOKENMON_REFRESH_README_MEDIA=1|0
+  TOKENMON_README_MEDIA_OUTPUT_DIR=<path>
+  CSC_LINK, CSC_KEY_PASSWORD
+  APPLE_API_KEY, APPLE_API_KEY_ID, APPLE_API_ISSUER
+  or APPLE_ID, APPLE_ID_PASSWORD, APPLE_TEAM_ID
+  ALLOW_UNSIGNED=1 for local dry runs without signing/notarization
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --output)
+      shift
+      OUTPUT_DIR="${1:-}"
+      APP_BUNDLE="$OUTPUT_DIR/$APP_NAME.app"
+      ZIP_PATH="$OUTPUT_DIR/$ZIP_NAME"
+      DMG_PATH="$OUTPUT_DIR/$DMG_NAME"
+      SHA256_PATH="$OUTPUT_DIR/SHA256SUMS.txt"
+      ;;
+    --app-bundle)
+      shift
+      APP_BUNDLE_INPUT="${1:-}"
+      ;;
+    --scratch-path)
+      shift
+      SCRATCH_PATH="${1:-}"
+      ;;
+    --include-developer-tools)
+      INCLUDE_DEVELOPER_TOOLS=1
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      printf 'Unsupported argument: %s\n' "$1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift || true
+done
+
+cleanup() {
+  if (( ${#ORIGINAL_KEYCHAINS[@]} > 0 )); then
+    security list-keychains -d user -s "${ORIGINAL_KEYCHAINS[@]}" >/dev/null 2>&1 || true
+  fi
+
+  if [[ -n "$KEYCHAIN_PATH" ]]; then
+    security delete-keychain "$KEYCHAIN_PATH" >/dev/null 2>&1 || true
+  fi
+
+  if [[ -n "$CERT_PATH" ]]; then
+    rm -f "$CERT_PATH" >/dev/null 2>&1 || true
+  fi
+
+  if [[ -n "$NOTARY_KEY_PATH" ]]; then
+    rm -f "$NOTARY_KEY_PATH" >/dev/null 2>&1 || true
+  fi
+}
+
+trap cleanup EXIT
+
+has_signing_credentials() {
+  [[ -n "${CSC_LINK:-}" && -n "${CSC_KEY_PASSWORD:-}" ]]
+}
+
+has_notarization_credentials() {
+  if [[ -n "${APPLE_API_KEY:-}" && -n "${APPLE_API_KEY_ID:-}" && -n "${APPLE_API_ISSUER:-}" ]]; then
+    return 0
+  fi
+
+  [[ -n "${APPLE_ID:-}" && -n "${APPLE_ID_PASSWORD:-}" && -n "${APPLE_TEAM_ID:-}" ]]
+}
+
+build_release_bundle() {
+  if [[ -n "$APP_BUNDLE_INPUT" ]]; then
+    APP_BUNDLE="$APP_BUNDLE_INPUT"
+    if [[ "$(dirname "$APP_BUNDLE")" != "$OUTPUT_DIR" ]]; then
+      mkdir -p "$OUTPUT_DIR"
+      if [[ -f "$(dirname "$APP_BUNDLE")/RELEASE_NOTES.txt" ]]; then
+        cp "$(dirname "$APP_BUNDLE")/RELEASE_NOTES.txt" "$OUTPUT_DIR/RELEASE_NOTES.txt"
+      fi
+      if [[ -f "$(dirname "$APP_BUNDLE")/FIRST_RUN_CHECKLIST.txt" ]]; then
+        cp "$(dirname "$APP_BUNDLE")/FIRST_RUN_CHECKLIST.txt" "$OUTPUT_DIR/FIRST_RUN_CHECKLIST.txt"
+      fi
+    fi
+    return
+  fi
+
+  local started_at
+  started_at="$(timing_now)"
+  mkdir -p "$OUTPUT_DIR"
+
+  local args=("--output" "$OUTPUT_DIR")
+  if [[ "$INCLUDE_DEVELOPER_TOOLS" == "1" ]]; then
+    args+=("--include-developer-tools")
+  fi
+  if [[ -n "$SCRATCH_PATH" ]]; then
+    args+=("--scratch-path" "$SCRATCH_PATH")
+  fi
+
+  VERSION="$VERSION" \
+  BUILD_NUMBER="$BUILD_NUMBER" \
+  BUNDLE_ID="$BUNDLE_ID" \
+  TOKENMON_GITHUB_REPOSITORY="$REPOSITORY_TARGET" \
+  "$ROOT/scripts/build-release" "${args[@]}"
+  record_timing "release_packaging" "build_release_bundle" "$started_at"
+}
+
+generate_release_notes() {
+  local started_at
+  local release_tag
+  local script_output
+
+  started_at="$(timing_now)"
+  release_tag="v$VERSION"
+  script_output="$(
+    TOKENMON_GITHUB_REPOSITORY="$REPOSITORY_TARGET" \
+    "$ROOT/scripts/generate-release-notes" \
+      --tag "$release_tag" \
+      --repo "$REPOSITORY_TARGET" \
+      --markdown-output "$OUTPUT_DIR/RELEASE_NOTES.md" \
+      --sparkle-output "$OUTPUT_DIR/RELEASE_NOTES.txt" \
+      --title-output "$OUTPUT_DIR/RELEASE_TITLE"
+  )"
+  printf '%s\n' "$script_output"
+  record_timing "release_packaging" "generate_release_notes" "$started_at"
+}
+
+refresh_readme_media() {
+  if [[ "$REFRESH_README_MEDIA" != "1" ]]; then
+    echo "README media refresh: skipped"
+    return
+  fi
+
+  local started_at
+  local args=("--allow-menu-bar-skip")
+  started_at="$(timing_now)"
+
+  if [[ -n "$README_MEDIA_OUTPUT_DIR" ]]; then
+    args+=("--output-dir" "$README_MEDIA_OUTPUT_DIR")
+  fi
+
+  TOKENMON_CAPTURE_APP_BUNDLE="$APP_BUNDLE" \
+    "$ROOT/scripts/capture-readme-screenshots" "${args[@]}"
+  record_timing "release_packaging" "refresh_readme_media" "$started_at"
+}
+
+prepare_signing_keychain() {
+  CERT_PATH="$(mktemp -t tokenmon-cert.XXXXXX.p12)"
+  KEYCHAIN_PATH="/tmp/tokenmon-build-$(openssl rand -hex 8).keychain-db"
+  KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
+
+  if echo "$CSC_LINK" | base64 --decode > "$CERT_PATH" 2>/dev/null; then
+    :
+  elif [[ "$CSC_LINK" == file://* ]]; then
+    cp "${CSC_LINK#file://}" "$CERT_PATH"
+  elif [[ "$CSC_LINK" =~ ^https?:// ]]; then
+    curl -fsSL "$CSC_LINK" -o "$CERT_PATH"
+  else
+    echo "Unsupported CSC_LINK format" >&2
+    exit 1
+  fi
+
+  while IFS= read -r keychain; do
+    keychain="${keychain//\"/}"
+    [[ -n "$keychain" ]] && ORIGINAL_KEYCHAINS+=("$keychain")
+  done < <(security list-keychains -d user 2>/dev/null || true)
+
+  security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+  security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+  security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+  if (( ${#ORIGINAL_KEYCHAINS[@]} > 0 )); then
+    security list-keychains -d user -s "$KEYCHAIN_PATH" "${ORIGINAL_KEYCHAINS[@]}"
+  else
+    security list-keychains -d user -s "$KEYCHAIN_PATH"
+  fi
+  security import "$CERT_PATH" \
+    -f pkcs12 \
+    -k "$KEYCHAIN_PATH" \
+    -P "$CSC_KEY_PASSWORD" \
+    -T /usr/bin/codesign \
+    -T /usr/bin/security \
+    -T /usr/bin/productbuild \
+    >/dev/null 2>&1
+  security set-key-partition-list \
+    -S apple-tool:,apple:,codesign: \
+    -s \
+    -k "$KEYCHAIN_PASSWORD" \
+    "$KEYCHAIN_PATH" \
+    >/dev/null 2>&1
+
+  SIGNING_IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | awk -F'"' '/Developer ID Application/ {print $2; exit}')"
+  if [[ -z "$SIGNING_IDENTITY" ]]; then
+    echo "Developer ID Application identity not found" >&2
+    security find-identity -v -p codesigning "$KEYCHAIN_PATH" || true
+    exit 1
+  fi
+}
+
+sign_app_bundle() {
+  codesign \
+    --force \
+    --deep \
+    --keychain "$KEYCHAIN_PATH" \
+    --options runtime \
+    --timestamp \
+    --sign "$SIGNING_IDENTITY" \
+    "$APP_BUNDLE"
+
+  codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
+}
+
+notarytool_args() {
+  if [[ -n "${APPLE_API_KEY:-}" && -n "${APPLE_API_KEY_ID:-}" && -n "${APPLE_API_ISSUER:-}" ]]; then
+    NOTARY_KEY_PATH="$(mktemp -t tokenmon-notary.XXXXXX.p8)"
+    printf '%s' "$APPLE_API_KEY" > "$NOTARY_KEY_PATH"
+    printf '%s\n' "--key" "$NOTARY_KEY_PATH" "--key-id" "$APPLE_API_KEY_ID" "--issuer" "$APPLE_API_ISSUER"
+    return 0
+  fi
+
+  printf '%s\n' "--apple-id" "$APPLE_ID" "--password" "$APPLE_ID_PASSWORD" "--team-id" "$APPLE_TEAM_ID"
+}
+
+notarize_archive() {
+  local archive_path="$1"
+  local args=()
+
+  while IFS= read -r line; do
+    args+=("$line")
+  done < <(notarytool_args)
+
+  xcrun notarytool submit "$archive_path" "${args[@]}" --wait
+}
+
+staple_bundle() {
+  local target_path="$1"
+  xcrun stapler staple "$target_path"
+}
+
+create_release_zip() {
+  ditto -c -k --keepParent "$APP_BUNDLE" "$ZIP_PATH"
+}
+
+create_release_dmg() {
+  local staging_dir="$OUTPUT_DIR/.dmg-staging"
+
+  rm -rf "$staging_dir"
+  mkdir -p "$staging_dir"
+  ditto "$APP_BUNDLE" "$staging_dir/$APP_NAME.app"
+  ln -s /Applications "$staging_dir/Applications"
+
+  hdiutil create \
+    -quiet \
+    -volname "$APP_NAME" \
+    -srcfolder "$staging_dir" \
+    -ov \
+    -format UDZO \
+    "$DMG_PATH"
+
+  rm -rf "$staging_dir"
+}
+
+sign_dmg() {
+  codesign --force --keychain "$KEYCHAIN_PATH" --timestamp --sign "$SIGNING_IDENTITY" "$DMG_PATH"
+}
+
+verify_notarized_outputs() {
+  xcrun stapler validate "$APP_BUNDLE"
+  xcrun stapler validate "$DMG_PATH"
+  spctl --assess --type execute -vv "$APP_BUNDLE"
+  spctl --assess --type open --context context:primary-signature -vv "$DMG_PATH"
+}
+
+write_checksums() {
+  (
+    cd "$OUTPUT_DIR"
+    shasum -a 256 "$ZIP_NAME" "$DMG_NAME" > "$SHA256_PATH"
+  )
+}
+
+main() {
+  build_release_bundle
+  generate_release_notes
+  refresh_readme_media
+
+  if [[ ! -d "$APP_BUNDLE" ]]; then
+    echo "Failed to locate app bundle at $APP_BUNDLE." >&2
+    exit 1
+  fi
+
+  rm -f "$ZIP_PATH" "$DMG_PATH" "$SHA256_PATH"
+
+  if has_signing_credentials && has_notarization_credentials; then
+    local signing_started_at
+    signing_started_at="$(timing_now)"
+    prepare_signing_keychain
+    sign_app_bundle
+
+    local notarize_zip="$OUTPUT_DIR/.notarize-$ZIP_NAME"
+    ditto -c -k --keepParent "$APP_BUNDLE" "$notarize_zip"
+    notarize_archive "$notarize_zip"
+    staple_bundle "$APP_BUNDLE"
+    rm -f "$notarize_zip"
+
+    create_release_zip
+    create_release_dmg
+    sign_dmg
+    notarize_archive "$DMG_PATH"
+    staple_bundle "$DMG_PATH"
+    verify_notarized_outputs
+    record_timing "release_packaging" "sign_notarize_release_archive" "$signing_started_at"
+  elif [[ "$ALLOW_UNSIGNED" == "1" ]]; then
+    local packaging_started_at
+    packaging_started_at="$(timing_now)"
+    create_release_zip
+    create_release_dmg
+    record_timing "release_packaging" "package_unsigned_release_archive" "$packaging_started_at"
+  else
+    echo "Signing and notarization credentials are required. Set ALLOW_UNSIGNED=1 to bypass for local dry runs." >&2
+    exit 1
+  fi
+
+  local checksums_started_at
+  checksums_started_at="$(timing_now)"
+  write_checksums
+  record_timing "release_packaging" "write_release_checksums" "$checksums_started_at"
+
+  echo "ZIP: $ZIP_PATH"
+  echo "DMG: $DMG_PATH"
+  echo "Checksums: $SHA256_PATH"
+  echo "Bundle ID: $BUNDLE_ID"
+  echo "Version: $VERSION ($BUILD_NUMBER)"
+}
+
+main "$@"

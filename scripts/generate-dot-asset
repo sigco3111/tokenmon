@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+size=16
+count=1
+gap=4
+color="#4B9B6B"
+output=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --size)
+      shift
+      size="${1:-}"
+      ;;
+    --count)
+      shift
+      count="${1:-}"
+      ;;
+    --gap)
+      shift
+      gap="${1:-}"
+      ;;
+    --color)
+      shift
+      color="${1:-}"
+      ;;
+    --output)
+      shift
+      output="${1:-}"
+      ;;
+    *)
+      printf 'Unsupported argument: %s\n' "$1" >&2
+      exit 2
+      ;;
+  esac
+  shift || true
+done
+
+if [[ -z "$output" ]]; then
+  printf 'Missing required --output <path>\n' >&2
+  exit 2
+fi
+
+case "$size" in
+  ''|*[!0-9]*)
+    printf 'Invalid --size: %s\n' "$size" >&2
+    exit 2
+    ;;
+esac
+
+case "$count" in
+  ''|*[!0-9]*)
+    printf 'Invalid --count: %s\n' "$count" >&2
+    exit 2
+    ;;
+esac
+
+case "$gap" in
+  ''|*[!0-9]*)
+    printf 'Invalid --gap: %s\n' "$gap" >&2
+    exit 2
+    ;;
+esac
+
+if (( size <= 0 || count <= 0 )); then
+  printf 'Size and count must be positive integers\n' >&2
+  exit 2
+fi
+
+radius=$(( size / 2 ))
+width=$(( (count * size) + ((count - 1) * gap) ))
+height=$size
+
+mkdir -p "$(dirname "$output")"
+
+{
+  printf '<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d" fill="none">\n' "$width" "$height" "$width" "$height"
+  for ((i=0; i<count; i++)); do
+    cx=$(( radius + (i * (size + gap)) ))
+    cy=$radius
+    printf '  <circle cx="%d" cy="%d" r="%d" fill="%s"/>\n' "$cx" "$cy" "$radius" "$color"
+  done
+  printf '</svg>\n'
+} > "$output"
+
+printf 'dot_asset_output=%s\n' "$output"
+printf 'size=%d\n' "$size"
+printf 'count=%d\n' "$count"
+printf 'gap=%d\n' "$gap"
+printf 'color=%s\n' "$color"

@@ -1,0 +1,1738 @@
+import Foundation
+import TokenmonGameEngine
+import TokenmonDomain
+import TokenmonProviders
+
+private struct SQLiteMigration {
+    let version: Int
+    let statements: [String]
+    let runsInTransaction: Bool
+
+    init(version: Int, statements: [String], runsInTransaction: Bool = true) {
+        self.version = version
+        self.statements = statements
+        self.runsInTransaction = runsInTransaction
+    }
+}
+
+public struct TokenmonDatabaseSummary: Equatable, Sendable {
+    public let providers: Int
+    public let providerSessions: Int
+    public let ingestSources: Int
+    public let providerIngestEvents: Int
+    public let usageSamples: Int
+    public let species: Int
+    public let domainEvents: Int
+    public let totalNormalizedTokens: Int64
+    public let tokensSinceLastEncounter: Int64
+    public let nextEncounterThresholdTokens: Int64
+    public let tokensUntilNextEncounter: Int64
+    public let totalEncounters: Int64
+    public let totalCaptures: Int64
+    public let gameplayStartedAt: String
+    public let liveGameplayStartedAt: String?
+}
+
+public struct TokenmonDatabaseMaintenanceResult: Equatable, Sendable {
+    public let fileSizeBytesBefore: Int64
+    public let fileSizeBytesAfter: Int64
+    public let freelistPagesBefore: Int64
+    public let freelistPagesAfter: Int64
+}
+
+public enum TokenmonDeveloperToolsMutationError: Error, LocalizedError {
+    case negativeValue(field: String, value: Int64)
+    case invalidEncounterProgress(tokensSinceLastEncounter: Int64, nextEncounterThresholdTokens: Int64)
+    case inconsistentExplorationTotals(totalNormalizedTokens: Int64, tokensSinceLastEncounter: Int64)
+    case invalidCaptureTotals(totalEncounters: Int64, totalCaptures: Int64)
+    case missingForgeSpecies(field: FieldType, rarity: RarityTier)
+
+    public var errorDescription: String? {
+        switch self {
+        case let .negativeValue(field, value):
+            return "\(field) must be non-negative: \(value)"
+        case let .invalidEncounterProgress(tokensSinceLastEncounter, nextEncounterThresholdTokens):
+            return "tokens since last encounter (\(tokensSinceLastEncounter)) must be lower than next encounter threshold (\(nextEncounterThresholdTokens))"
+        case let .inconsistentExplorationTotals(totalNormalizedTokens, tokensSinceLastEncounter):
+            return "total normalized tokens (\(totalNormalizedTokens)) must be at least tokens since last encounter (\(tokensSinceLastEncounter))"
+        case let .invalidCaptureTotals(totalEncounters, totalCaptures):
+            return "total captures (\(totalCaptures)) cannot exceed total encounters (\(totalEncounters))"
+        case let .missingForgeSpecies(field, rarity):
+            return "no active species available for forged encounter in field=\(field.rawValue) rarity=\(rarity.rawValue)"
+        }
+    }
+}
+
+public struct TokenmonDeveloperEncounterForgeRequest: Equatable, Sendable {
+    public let provider: ProviderCode
+    public let field: FieldType
+    public let rarity: RarityTier
+    public let speciesID: String
+    public let outcome: EncounterOutcome
+    public let occurredAt: String
+    public let burstIntensityBand: Int
+
+    public init(
+        provider: ProviderCode,
+        field: FieldType,
+        rarity: RarityTier,
+        speciesID: String,
+        outcome: EncounterOutcome,
+        occurredAt: String = ISO8601DateFormatter().string(from: Date()),
+        burstIntensityBand: Int = 2
+    ) {
+        self.provider = provider
+        self.field = field
+        self.rarity = rarity
+        self.speciesID = speciesID
+        self.outcome = outcome
+        self.occurredAt = occurredAt
+        self.burstIntensityBand = burstIntensityBand
+    }
+}
+
+public final class TokenmonDatabaseManager {
+    private final class BootstrapState: @unchecked Sendable {
+        let lock = NSLock()
+        var bootstrappedPaths = Set<String>()
+    }
+
+    private static let bootstrapState = BootstrapState()
+
+    public let path: String
+
+    public init(path: String) {
+        self.path = path
+    }
+
+    public static func defaultPath() -> String {
+        defaultSupportDirectoryURL()
+            .appendingPathComponent("tokenmon.sqlite")
+            .path
+    }
+
+    public static func supportDirectory(forDatabasePath path: String? = nil) -> String {
+        if let path {
+            return URL(fileURLWithPath: path).deletingLastPathComponent().path
+        }
+        return defaultSupportDirectoryURL().path
+    }
+
+    public static func inboxDirectory(forDatabasePath path: String? = nil) -> String {
+        URL(fileURLWithPath: supportDirectory(forDatabasePath: path), isDirectory: true)
+            .appendingPathComponent("Inbox", isDirectory: true)
+            .path
+    }
+
+    public static func inboxPath(
+        provider: ProviderCode,
+        databasePath: String? = nil
+    ) -> String {
+        URL(fileURLWithPath: inboxDirectory(forDatabasePath: databasePath), isDirectory: true)
+            .appendingPathComponent("\(provider.rawValue).ndjson")
+            .path
+    }
+
+    public func open() throws -> SQLiteDatabase {
+        let url = URL(fileURLWithPath: path)
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+
+        let database = try SQLiteDatabase(path: path)
+        try ensureBootstrapped(database)
+        return database
+    }
+
+    public func bootstrap() throws {
+        let url = URL(fileURLWithPath: path)
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+
+        let database = try SQLiteDatabase(path: path)
+        try Self.bootstrapState.lock.withLock {
+            try bootstrap(database)
+            Self.bootstrapState.bootstrappedPaths.insert(path)
+        }
+    }
+
+    public func performMaintenance() throws -> TokenmonDatabaseMaintenanceResult {
+        let beforeFileSize = Self.fileSize(at: path)
+        let database = try open()
+        let freelistPagesBefore = try pragmaInt64("PRAGMA freelist_count;", database: database)
+
+        try database.execute("PRAGMA optimize;")
+        _ = try database.fetchAll("PRAGMA wal_checkpoint(TRUNCATE);") { _ in () }
+        try database.execute("VACUUM;")
+
+        let freelistPagesAfter = try pragmaInt64("PRAGMA freelist_count;", database: database)
+        let afterFileSize = Self.fileSize(at: path)
+
+        return TokenmonDatabaseMaintenanceResult(
+            fileSizeBytesBefore: beforeFileSize,
+            fileSizeBytesAfter: afterFileSize,
+            freelistPagesBefore: freelistPagesBefore,
+            freelistPagesAfter: freelistPagesAfter
+        )
+    }
+
+    public func summary() throws -> TokenmonDatabaseSummary {
+        let database = try open()
+        let explorationState = try currentExplorationState(database: database)
+        return TokenmonDatabaseSummary(
+            providers: try countRows(in: "providers", database: database),
+            providerSessions: try countRows(in: "provider_sessions", database: database),
+            ingestSources: try countRows(in: "ingest_sources", database: database),
+            providerIngestEvents: try countRows(in: "provider_ingest_events", database: database),
+            usageSamples: try countRows(in: "usage_samples", database: database),
+            species: try countRows(in: "species", database: database),
+            domainEvents: try countRows(in: "domain_events", database: database),
+            totalNormalizedTokens: explorationState.totalNormalizedTokens,
+            tokensSinceLastEncounter: explorationState.tokensSinceLastEncounter,
+            nextEncounterThresholdTokens: explorationState.nextEncounterThresholdTokens,
+            tokensUntilNextEncounter: max(
+                0,
+                explorationState.nextEncounterThresholdTokens - explorationState.tokensSinceLastEncounter
+            ),
+            totalEncounters: explorationState.totalEncounters,
+            totalCaptures: explorationState.totalCaptures,
+            gameplayStartedAt: try gameplayStartedAt(database: database),
+            liveGameplayStartedAt: try liveGameplayStartedAt(database: database)
+        )
+    }
+
+    public func liveGameplayStartedAt() throws -> String? {
+        try liveGameplayStartedAt(database: open())
+    }
+
+    public func markLiveGameplayStarted(at timestamp: String = ISO8601DateFormatter().string(from: Date())) throws {
+        try upsertRawSetting(
+            key: "live_gameplay_started_at",
+            encodedValue: "\"\(timestamp)\"",
+            updatedAt: ISO8601DateFormatter().string(from: Date()),
+            database: open()
+        )
+    }
+
+    public func clearLiveGameplayStartedAt() throws {
+        let database = try open()
+        try database.execute(
+            """
+            DELETE FROM settings
+            WHERE setting_key = 'live_gameplay_started_at';
+            """
+        )
+    }
+
+    public func resetProgress(startedAt: String = ISO8601DateFormatter().string(from: Date())) throws {
+        let database = try open()
+        let now = ISO8601DateFormatter().string(from: Date())
+
+        try database.inTransaction {
+            try database.execute(
+                """
+                UPDATE exploration_state
+                SET last_usage_sample_id = NULL,
+                    updated_at = ?
+                WHERE exploration_state_id = 1;
+                """,
+                bindings: [.text(now)]
+            )
+            try database.execute("DELETE FROM backfill_runs;")
+            try database.execute("DELETE FROM dex_captured;")
+            try database.execute("DELETE FROM dex_seen;")
+            try database.execute("DELETE FROM encounters;")
+            try database.execute("DELETE FROM domain_events;")
+            try database.execute("DELETE FROM usage_samples;")
+            try database.execute("DELETE FROM provider_ingest_events;")
+            try database.execute("DELETE FROM ingest_sources;")
+            try database.execute("DELETE FROM provider_health;")
+            try database.execute("DELETE FROM provider_sessions;")
+            try database.execute(
+                """
+                UPDATE exploration_state
+                SET total_normalized_tokens = 0,
+                    tokens_since_last_encounter = 0,
+                    next_encounter_threshold_tokens = ?,
+                    total_encounters = 0,
+                    total_captures = 0,
+                    last_usage_sample_id = NULL,
+                    updated_at = ?
+                WHERE exploration_state_id = 1;
+                """,
+                bindings: [
+                    .integer(ExplorationAccumulatorConfig().tokensRequiredForEncounter(1)),
+                    .text(now),
+                ]
+            )
+            try upsertRawSetting(
+                key: "gameplay_started_at",
+                encodedValue: "\"\(startedAt)\"",
+                updatedAt: now,
+                database: database
+            )
+            try setInternalLowThresholdOverrideEnabled(
+                false,
+                updatedAt: now,
+                database: database
+            )
+        }
+    }
+
+    public func resetDexProgress() throws {
+        let database = try open()
+        let now = ISO8601DateFormatter().string(from: Date())
+
+        try database.inTransaction {
+            try deleteDomainEvents(
+                matching: [.seenDexUpdated, .capturedDexUpdated],
+                database: database
+            )
+            try database.execute("DELETE FROM dex_captured;")
+            try database.execute("DELETE FROM dex_seen;")
+            try touchExplorationState(updatedAt: now, database: database)
+        }
+    }
+
+    public func resetEncounterHistory() throws {
+        let database = try open()
+        let now = ISO8601DateFormatter().string(from: Date())
+        let firstThreshold = ExplorationAccumulatorConfig().tokensRequiredForEncounter(1)
+
+        try database.inTransaction {
+            try deleteDomainEvents(
+                matching: [
+                    .encounterThresholdCrossed,
+                    .fieldSelected,
+                    .raritySelected,
+                    .speciesSelected,
+                    .encounterSpawned,
+                    .captureResolved,
+                    .seenDexUpdated,
+                    .capturedDexUpdated,
+                ],
+                database: database
+            )
+            try database.execute("DELETE FROM dex_captured;")
+            try database.execute("DELETE FROM dex_seen;")
+            try database.execute("DELETE FROM encounters;")
+            try database.execute(
+                """
+                UPDATE exploration_state
+                SET tokens_since_last_encounter = 0,
+                    next_encounter_threshold_tokens = ?,
+                    total_encounters = 0,
+                    total_captures = 0,
+                    updated_at = ?
+                WHERE exploration_state_id = 1;
+                """,
+                bindings: [
+                    .integer(firstThreshold),
+                    .text(now),
+                ]
+            )
+            try setInternalLowThresholdOverrideEnabled(
+                false,
+                updatedAt: now,
+                database: database
+            )
+        }
+    }
+
+    public func makeNextEncounterReady() throws {
+        let database = try open()
+        let state = try currentExplorationState(database: database)
+        let now = ISO8601DateFormatter().string(from: Date())
+
+        try database.execute(
+            """
+            UPDATE exploration_state
+            SET tokens_since_last_encounter = ?,
+                updated_at = ?
+            WHERE exploration_state_id = 1;
+            """,
+            bindings: [
+                .integer(max(0, state.nextEncounterThresholdTokens - 1)),
+                .text(now),
+            ]
+        )
+    }
+
+    public func applyExplorationOverride(
+        totalNormalizedTokens: Int64,
+        tokensSinceLastEncounter: Int64,
+        nextEncounterThresholdTokens: Int64
+    ) throws {
+        try validateExplorationOverride(
+            totalNormalizedTokens: totalNormalizedTokens,
+            tokensSinceLastEncounter: tokensSinceLastEncounter,
+            nextEncounterThresholdTokens: nextEncounterThresholdTokens
+        )
+
+        let database = try open()
+        let now = ISO8601DateFormatter().string(from: Date())
+
+        try database.inTransaction {
+            try database.execute(
+                """
+                UPDATE exploration_state
+                SET total_normalized_tokens = ?,
+                    tokens_since_last_encounter = ?,
+                    next_encounter_threshold_tokens = ?,
+                    updated_at = ?
+                WHERE exploration_state_id = 1;
+                """,
+                bindings: [
+                    .integer(totalNormalizedTokens),
+                    .integer(tokensSinceLastEncounter),
+                    .integer(nextEncounterThresholdTokens),
+                    .text(now),
+                ]
+            )
+            try setInternalLowThresholdOverrideEnabled(
+                nextEncounterThresholdTokens < ExplorationAccumulatorConfig().minimumEncounterThresholdTokens,
+                updatedAt: now,
+                database: database
+            )
+        }
+    }
+
+    public func applyTotalsOverride(
+        totalEncounters: Int64,
+        totalCaptures: Int64
+    ) throws {
+        try validateTotalsOverride(
+            totalEncounters: totalEncounters,
+            totalCaptures: totalCaptures
+        )
+
+        let database = try open()
+        let now = ISO8601DateFormatter().string(from: Date())
+
+        try database.execute(
+            """
+            UPDATE exploration_state
+            SET total_encounters = ?,
+                total_captures = ?,
+                updated_at = ?
+            WHERE exploration_state_id = 1;
+            """,
+            bindings: [
+                .integer(totalEncounters),
+                .integer(totalCaptures),
+                .text(now),
+            ]
+        )
+    }
+
+    public func forgeEncounter(
+        _ request: TokenmonDeveloperEncounterForgeRequest
+    ) throws -> PersistedEncounterRecord {
+        let database = try open()
+        let currentState = try currentExplorationState(database: database)
+
+        let providerSessionID = "internal-devtools-\(request.provider.rawValue)"
+        let eventFingerprint = "internal-devtools:\(UUID().uuidString.lowercased())"
+        let rawReference = ProviderRawReference(
+            kind: "developer_tool",
+            offset: nil,
+            eventName: "encounter_forge"
+        )
+        let usageEvent = ProviderUsageSampleEvent(
+            eventType: "provider_usage_sample",
+            provider: request.provider,
+            sourceMode: "internal_developer_tools",
+            providerSessionID: providerSessionID,
+            observedAt: request.occurredAt,
+            workspaceDir: nil,
+            modelSlug: nil,
+            transcriptPath: nil,
+            totalInputTokens: currentState.totalNormalizedTokens,
+            totalOutputTokens: 0,
+            totalCachedInputTokens: 0,
+            normalizedTotalTokens: currentState.totalNormalizedTokens,
+            providerEventFingerprint: eventFingerprint,
+            rawReference: rawReference,
+            currentInputTokens: 0,
+            currentOutputTokens: 0
+        )
+
+        let captureResolver = CaptureResolver()
+        let captureProbability = try captureResolver.captureProbability(for: request.rarity)
+        let captureRoll = forgedCaptureRoll(
+            outcome: request.outcome,
+            captureProbability: captureProbability
+        )
+        let now = ISO8601DateFormatter().string(from: Date())
+
+        var persistedEncounter: PersistedEncounterRecord?
+
+        try database.inTransaction {
+            let sessionRowID = try upsertDeveloperToolProviderSession(
+                database: database,
+                provider: request.provider,
+                providerSessionID: providerSessionID,
+                observedAt: request.occurredAt,
+                updatedAt: now
+            )
+            let ingestSourceID = try upsertDeveloperToolIngestSource(
+                database: database,
+                provider: request.provider,
+                updatedAt: now
+            )
+            let providerIngestEventID = try insertDeveloperToolProviderIngestEvent(
+                database: database,
+                event: usageEvent,
+                providerSessionRowID: sessionRowID,
+                ingestSourceID: ingestSourceID,
+                updatedAt: now
+            )
+            let usageSampleID = try insertDeveloperToolUsageSample(
+                database: database,
+                event: usageEvent,
+                providerIngestEventID: providerIngestEventID,
+                providerSessionRowID: sessionRowID,
+                burstIntensityBand: request.burstIntensityBand,
+                updatedAt: now
+            )
+
+            try DomainEventStore.persist(
+                database: database,
+                envelope: TokenmonDomainEventRegistry.usageSampleRecorded(
+                    usageSampleID: usageSampleID,
+                    event: usageEvent,
+                    normalizedDeltaTokens: 0,
+                    gameplayEligibility: .outsideLiveRuntime,
+                    gameplayDeltaTokens: 0
+                )
+            )
+
+            try database.execute(
+                """
+                UPDATE exploration_state
+                SET total_encounters = total_encounters + 1,
+                    last_usage_sample_id = ?,
+                    updated_at = ?
+                WHERE exploration_state_id = 1;
+                """,
+                bindings: [
+                    .integer(usageSampleID),
+                    .text(now),
+                ]
+            )
+
+            persistedEncounter = try EncounterHistoryStore.persistResolvedEncounter(
+                database: database,
+                request: EncounterResolutionWriteRequest(
+                    providerCode: request.provider,
+                    providerSessionID: providerSessionID,
+                    providerSessionRowID: sessionRowID,
+                    usageSampleID: usageSampleID,
+                    thresholdEventIndex: 1,
+                    occurredAt: request.occurredAt,
+                    field: request.field,
+                    rarity: request.rarity,
+                    speciesID: request.speciesID,
+                    burstIntensityBand: request.burstIntensityBand,
+                    captureProbability: captureProbability,
+                    captureRoll: captureRoll,
+                    outcome: request.outcome,
+                    encounterSeedContextID: "internal-devtools-\(usageSampleID)"
+                )
+            )
+        }
+
+        guard let persistedEncounter else {
+            throw SQLiteError.statementFailed(
+                message: "failed to persist internal forged encounter",
+                sql: "internal developer tools forge transaction"
+            )
+        }
+
+        return persistedEncounter
+    }
+
+    public func explorationState() throws -> ExplorationAccumulatorState {
+        let database = try open()
+        return try currentExplorationState(database: database)
+    }
+
+    public func recentDomainEvents(limit: Int = 20) throws -> [PersistedDomainEventRecord] {
+        let database = try open()
+        return try database.fetchAll(
+            """
+            SELECT event_id,
+                   event_type,
+                   occurred_at,
+                   producer,
+                   correlation_id,
+                   causation_id,
+                   aggregate_type,
+                   aggregate_id,
+                   payload_json,
+                   created_at
+            FROM domain_events
+            ORDER BY domain_event_row_id DESC
+            LIMIT ?;
+            """,
+            bindings: [.integer(Int64(max(0, limit)))]
+        ) { statement in
+            PersistedDomainEventRecord(
+                eventID: SQLiteDatabase.columnText(statement, index: 0),
+                eventType: SQLiteDatabase.columnText(statement, index: 1),
+                occurredAt: SQLiteDatabase.columnText(statement, index: 2),
+                producer: SQLiteDatabase.columnText(statement, index: 3),
+                correlationID: SQLiteDatabase.columnOptionalText(statement, index: 4),
+                causationID: SQLiteDatabase.columnOptionalText(statement, index: 5),
+                aggregateType: SQLiteDatabase.columnOptionalText(statement, index: 6),
+                aggregateID: SQLiteDatabase.columnOptionalText(statement, index: 7),
+                payloadJSON: SQLiteDatabase.columnText(statement, index: 8),
+                createdAt: SQLiteDatabase.columnText(statement, index: 9)
+            )
+        }
+    }
+
+    private func bootstrap(_ database: SQLiteDatabase) throws {
+        try database.execute("PRAGMA journal_mode = WAL;")
+        try applyMigrations(database)
+        try seedProviders(database)
+        try ensureSpeciesCatalog(database)
+        try ensureExplorationState(database)
+        try ensureGameplayStartedAt(database)
+    }
+
+    private func touchExplorationState(updatedAt: String, database: SQLiteDatabase) throws {
+        try database.execute(
+            """
+            UPDATE exploration_state
+            SET updated_at = ?
+            WHERE exploration_state_id = 1;
+            """,
+            bindings: [.text(updatedAt)]
+        )
+    }
+
+    private func validateExplorationOverride(
+        totalNormalizedTokens: Int64,
+        tokensSinceLastEncounter: Int64,
+        nextEncounterThresholdTokens: Int64
+    ) throws {
+        if totalNormalizedTokens < 0 {
+            throw TokenmonDeveloperToolsMutationError.negativeValue(
+                field: "totalNormalizedTokens",
+                value: totalNormalizedTokens
+            )
+        }
+        if tokensSinceLastEncounter < 0 {
+            throw TokenmonDeveloperToolsMutationError.negativeValue(
+                field: "tokensSinceLastEncounter",
+                value: tokensSinceLastEncounter
+            )
+        }
+        if nextEncounterThresholdTokens <= 0 {
+            throw TokenmonDeveloperToolsMutationError.negativeValue(
+                field: "nextEncounterThresholdTokens",
+                value: nextEncounterThresholdTokens
+            )
+        }
+        if totalNormalizedTokens < tokensSinceLastEncounter {
+            throw TokenmonDeveloperToolsMutationError.inconsistentExplorationTotals(
+                totalNormalizedTokens: totalNormalizedTokens,
+                tokensSinceLastEncounter: tokensSinceLastEncounter
+            )
+        }
+        if tokensSinceLastEncounter >= nextEncounterThresholdTokens {
+            throw TokenmonDeveloperToolsMutationError.invalidEncounterProgress(
+                tokensSinceLastEncounter: tokensSinceLastEncounter,
+                nextEncounterThresholdTokens: nextEncounterThresholdTokens
+            )
+        }
+    }
+
+    private func validateTotalsOverride(
+        totalEncounters: Int64,
+        totalCaptures: Int64
+    ) throws {
+        if totalEncounters < 0 {
+            throw TokenmonDeveloperToolsMutationError.negativeValue(
+                field: "totalEncounters",
+                value: totalEncounters
+            )
+        }
+        if totalCaptures < 0 {
+            throw TokenmonDeveloperToolsMutationError.negativeValue(
+                field: "totalCaptures",
+                value: totalCaptures
+            )
+        }
+        if totalCaptures > totalEncounters {
+            throw TokenmonDeveloperToolsMutationError.invalidCaptureTotals(
+                totalEncounters: totalEncounters,
+                totalCaptures: totalCaptures
+            )
+        }
+    }
+
+    private func deleteDomainEvents(
+        matching eventTypes: [TokenmonDomainEventType],
+        database: SQLiteDatabase
+    ) throws {
+        guard eventTypes.isEmpty == false else {
+            return
+        }
+
+        let quotedEventTypes = eventTypes
+            .map(\.rawValue)
+            .map { "'\($0)'" }
+            .joined(separator: ", ")
+        try database.execute(
+            "DELETE FROM domain_events WHERE event_type IN (\(quotedEventTypes));"
+        )
+    }
+
+    private func internalLowThresholdOverrideEnabled(database: SQLiteDatabase) throws -> Bool {
+        let decoder = JSONDecoder()
+        guard let rawJSON = try database.fetchOne(
+            """
+            SELECT setting_value_json
+            FROM settings
+            WHERE setting_key = 'internal_low_threshold_override_enabled'
+            LIMIT 1;
+            """,
+            map: { statement in
+                SQLiteDatabase.columnText(statement, index: 0)
+            }
+        ) else {
+            return false
+        }
+
+        return (try? decoder.decode(Bool.self, from: Data(rawJSON.utf8))) ?? false
+    }
+
+    private func setInternalLowThresholdOverrideEnabled(
+        _ enabled: Bool,
+        updatedAt: String,
+        database: SQLiteDatabase
+    ) throws {
+        try upsertRawSetting(
+            key: "internal_low_threshold_override_enabled",
+            encodedValue: enabled ? "true" : "false",
+            updatedAt: updatedAt,
+            database: database
+        )
+    }
+
+    private func upsertDeveloperToolProviderSession(
+        database: SQLiteDatabase,
+        provider: ProviderCode,
+        providerSessionID: String,
+        observedAt: String,
+        updatedAt: String
+    ) throws -> Int64 {
+        try database.execute(
+            """
+            INSERT INTO provider_sessions (
+                provider_code,
+                provider_session_id,
+                session_identity_kind,
+                source_mode,
+                model_slug,
+                workspace_dir,
+                transcript_path,
+                started_at,
+                ended_at,
+                last_seen_at,
+                session_state,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, 'internal_tool', 'internal_developer_tools', NULL, NULL, NULL, ?, NULL, ?, 'active', ?, ?)
+            ON CONFLICT(provider_code, provider_session_id) DO UPDATE SET
+                source_mode = excluded.source_mode,
+                last_seen_at = excluded.last_seen_at,
+                session_state = 'active',
+                updated_at = excluded.updated_at;
+            """,
+            bindings: [
+                .text(provider.rawValue),
+                .text(providerSessionID),
+                .text(observedAt),
+                .text(observedAt),
+                .text(updatedAt),
+                .text(updatedAt),
+            ]
+        )
+
+        guard let rowID = try database.fetchOne(
+            """
+            SELECT provider_session_row_id
+            FROM provider_sessions
+            WHERE provider_code = ? AND provider_session_id = ?
+            LIMIT 1;
+            """,
+            bindings: [
+                .text(provider.rawValue),
+                .text(providerSessionID),
+            ],
+            map: { statement in
+                SQLiteDatabase.columnInt64(statement, index: 0)
+            }
+        ) else {
+            throw SQLiteError.statementFailed(
+                message: "failed to look up internal developer session",
+                sql: "SELECT provider_session_row_id FROM provider_sessions ..."
+            )
+        }
+
+        return rowID
+    }
+
+    private func upsertDeveloperToolIngestSource(
+        database: SQLiteDatabase,
+        provider: ProviderCode,
+        updatedAt: String
+    ) throws -> Int64 {
+        let sourceKey = "internal-developer-tools:\(provider.rawValue)"
+        try database.execute(
+            """
+            INSERT INTO ingest_sources (
+                source_key,
+                source_kind,
+                source_path,
+                last_offset,
+                last_line_number,
+                last_event_fingerprint,
+                last_seen_at,
+                updated_at
+            ) VALUES (?, 'internal_developer_tools', NULL, 0, 0, NULL, ?, ?)
+            ON CONFLICT(source_key) DO UPDATE SET
+                last_seen_at = excluded.last_seen_at,
+                updated_at = excluded.updated_at;
+            """,
+            bindings: [
+                .text(sourceKey),
+                .text(updatedAt),
+                .text(updatedAt),
+            ]
+        )
+
+        guard let rowID = try database.fetchOne(
+            """
+            SELECT ingest_source_id
+            FROM ingest_sources
+            WHERE source_key = ?
+            LIMIT 1;
+            """,
+            bindings: [.text(sourceKey)],
+            map: { statement in
+                SQLiteDatabase.columnInt64(statement, index: 0)
+            }
+        ) else {
+            throw SQLiteError.statementFailed(
+                message: "failed to look up internal developer ingest source",
+                sql: "SELECT ingest_source_id FROM ingest_sources ..."
+            )
+        }
+
+        return rowID
+    }
+
+    private func insertDeveloperToolProviderIngestEvent(
+        database: SQLiteDatabase,
+        event: ProviderUsageSampleEvent,
+        providerSessionRowID: Int64,
+        ingestSourceID: Int64,
+        updatedAt: String
+    ) throws -> Int64 {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let rawPayload = String(decoding: try encoder.encode(event), as: UTF8.self)
+
+        try database.execute(
+            """
+            INSERT INTO provider_ingest_events (
+                provider_code,
+                source_mode,
+                provider_session_row_id,
+                ingest_source_id,
+                provider_event_fingerprint,
+                raw_reference_kind,
+                raw_reference_event_name,
+                raw_reference_offset,
+                observed_at,
+                payload_json,
+                acceptance_state,
+                rejection_reason,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', NULL, ?);
+            """,
+            bindings: [
+                .text(event.provider.rawValue),
+                .text(event.sourceMode),
+                .integer(providerSessionRowID),
+                .integer(ingestSourceID),
+                .text(event.providerEventFingerprint),
+                .text(event.rawReference.kind),
+                event.rawReference.eventName.map(SQLiteValue.text) ?? .null,
+                event.rawReference.offset.map(SQLiteValue.text) ?? .null,
+                .text(event.observedAt),
+                .text(rawPayload),
+                .text(updatedAt),
+            ]
+        )
+
+        return database.lastInsertRowID()
+    }
+
+    private func insertDeveloperToolUsageSample(
+        database: SQLiteDatabase,
+        event: ProviderUsageSampleEvent,
+        providerIngestEventID: Int64,
+        providerSessionRowID: Int64,
+        burstIntensityBand: Int,
+        updatedAt _: String
+    ) throws -> Int64 {
+        try database.execute(
+            """
+            INSERT INTO usage_samples (
+                provider_ingest_event_id,
+                provider_code,
+                provider_session_row_id,
+                observed_at,
+                total_input_tokens,
+                total_output_tokens,
+                total_cached_input_tokens,
+                normalized_total_tokens,
+                normalized_delta_tokens,
+                current_input_tokens,
+                current_output_tokens,
+                gameplay_eligibility,
+                gameplay_delta_tokens,
+                burst_intensity_band,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 0, ?, ?);
+            """,
+            bindings: [
+                .integer(providerIngestEventID),
+                .text(event.provider.rawValue),
+                .integer(providerSessionRowID),
+                .text(event.observedAt),
+                .integer(event.totalInputTokens),
+                .integer(event.totalOutputTokens),
+                .integer(event.totalCachedInputTokens),
+                .integer(event.normalizedTotalTokens),
+                event.currentInputTokens.map(SQLiteValue.integer) ?? .null,
+                event.currentOutputTokens.map(SQLiteValue.integer) ?? .null,
+                .text(UsageSampleGameplayEligibility.outsideLiveRuntime.rawValue),
+                .integer(Int64(burstIntensityBand)),
+                .text(event.observedAt),
+            ]
+        )
+
+        return database.lastInsertRowID()
+    }
+
+    private func forgedCaptureRoll(
+        outcome: EncounterOutcome,
+        captureProbability: Double
+    ) -> Double {
+        switch outcome {
+        case .captured:
+            return min(max(captureProbability * 0.5, 0.01), max(captureProbability - 0.01, 0))
+        case .escaped:
+            return min(max(captureProbability + 0.05, captureProbability + 0.001), 0.99)
+        }
+    }
+
+    private static func defaultSupportDirectoryURL() -> URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Tokenmon", isDirectory: true)
+    }
+
+    private func pragmaInt64(_ sql: String, database: SQLiteDatabase) throws -> Int64 {
+        try database.fetchOne(sql) { statement in
+            SQLiteDatabase.columnInt64(statement, index: 0)
+        } ?? 0
+    }
+
+    private static func fileSize(at path: String) -> Int64 {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: path)
+        return (attributes?[.size] as? NSNumber)?.int64Value ?? 0
+    }
+
+    private func ensureBootstrapped(_ database: SQLiteDatabase) throws {
+        try Self.bootstrapState.lock.withLock {
+            guard Self.bootstrapState.bootstrappedPaths.contains(path) == false else {
+                return
+            }
+
+            try bootstrap(database)
+            Self.bootstrapState.bootstrappedPaths.insert(path)
+        }
+    }
+
+    private func applyMigrations(_ database: SQLiteDatabase) throws {
+        let currentVersion = Int(try database.fetchOne("PRAGMA user_version;") { statement in
+            SQLiteDatabase.columnInt64(statement, index: 0)
+        } ?? 0)
+
+        for migration in migrations where migration.version > currentVersion {
+            let applyStatements = {
+                for statement in migration.statements {
+                    try database.execute(statement)
+                }
+                try database.execute("PRAGMA user_version = \(migration.version);")
+            }
+
+            if migration.runsInTransaction {
+                try database.inTransaction {
+                    try applyStatements()
+                }
+            } else {
+                try applyStatements()
+            }
+        }
+    }
+
+    private func seedProviders(_ database: SQLiteDatabase) throws {
+        let now = ISO8601DateFormatter().string(from: Date())
+
+        for provider in ProviderCode.allCases {
+            try database.execute(
+                """
+                INSERT INTO providers (
+                    provider_code,
+                    display_name,
+                    default_support_level,
+                    is_enabled,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, 1, ?, ?)
+                ON CONFLICT(provider_code) DO UPDATE SET
+                    display_name = excluded.display_name,
+                    default_support_level = excluded.default_support_level,
+                    updated_at = excluded.updated_at;
+                """,
+                bindings: [
+                    .text(provider.rawValue),
+                    .text(provider.displayName),
+                    .text(provider.defaultSupportLevel),
+                    .text(now),
+                    .text(now),
+                ]
+            )
+        }
+    }
+
+    private func ensureExplorationState(_ database: SQLiteDatabase) throws {
+        let now = ISO8601DateFormatter().string(from: Date())
+        let initialThresholdTokens = ExplorationAccumulatorConfig().tokensRequiredForEncounter(1)
+        try database.execute(
+            """
+            INSERT OR IGNORE INTO exploration_state (
+                exploration_state_id,
+                total_normalized_tokens,
+                tokens_since_last_encounter,
+                next_encounter_threshold_tokens,
+                total_encounters,
+                total_captures,
+                last_usage_sample_id,
+                updated_at
+            ) VALUES (1, 0, 0, ?, 0, 0, NULL, ?);
+            """,
+            bindings: [
+                .integer(initialThresholdTokens),
+                .text(now),
+            ]
+        )
+
+        if let row = try database.fetchOne(
+            """
+            SELECT total_encounters,
+                   next_encounter_threshold_tokens
+            FROM exploration_state
+            WHERE exploration_state_id = 1
+            LIMIT 1;
+            """,
+            map: { statement in
+            (
+                totalEncounters: SQLiteDatabase.columnInt64(statement, index: 0),
+                nextEncounterThresholdTokens: SQLiteDatabase.columnInt64(statement, index: 1)
+            )
+        }) {
+            let lowThresholdOverrideEnabled = try internalLowThresholdOverrideEnabled(database: database)
+            let shouldHealThreshold =
+                row.nextEncounterThresholdTokens <= 0
+                || (
+                    row.nextEncounterThresholdTokens < initialThresholdTokens
+                    && lowThresholdOverrideEnabled == false
+                )
+
+            guard shouldHealThreshold else {
+                return
+            }
+
+            try database.execute(
+                """
+                UPDATE exploration_state
+                SET next_encounter_threshold_tokens = ?,
+                    updated_at = ?
+                WHERE exploration_state_id = 1;
+                """,
+                bindings: [
+                    .integer(ExplorationAccumulatorConfig().tokensRequiredForEncounter(row.totalEncounters + 1)),
+                    .text(now),
+                ]
+            )
+        }
+    }
+
+    private func ensureGameplayStartedAt(_ database: SQLiteDatabase) throws {
+        let now = ISO8601DateFormatter().string(from: Date())
+        try database.execute(
+            """
+            INSERT OR IGNORE INTO settings (
+                setting_key,
+                setting_value_json,
+                updated_at
+            ) VALUES ('gameplay_started_at', ?, ?);
+            """,
+            bindings: [
+                .text("\"\(now)\""),
+                .text(now),
+            ]
+        )
+    }
+
+    private func gameplayStartedAt(database: SQLiteDatabase) throws -> String {
+        if let value = try stringSetting(key: "gameplay_started_at", database: database) {
+            return value
+        }
+
+        let now = ISO8601DateFormatter().string(from: Date())
+        try upsertRawSetting(
+            key: "gameplay_started_at",
+            encodedValue: "\"\(now)\"",
+            updatedAt: now,
+            database: database
+        )
+        return now
+    }
+
+    private func liveGameplayStartedAt(database: SQLiteDatabase) throws -> String? {
+        try stringSetting(key: "live_gameplay_started_at", database: database)
+    }
+
+    private func stringSetting(key: String, database: SQLiteDatabase) throws -> String? {
+        let decoder = JSONDecoder()
+        guard let rawJSON = try database.fetchOne(
+            """
+            SELECT setting_value_json
+            FROM settings
+            WHERE setting_key = ?
+            LIMIT 1;
+            """,
+            bindings: [.text(key)],
+            map: { statement in
+                SQLiteDatabase.columnText(statement, index: 0)
+            }
+        ) else {
+            return nil
+        }
+
+        return try decoder.decode(String.self, from: Data(rawJSON.utf8))
+    }
+
+    private func upsertRawSetting(
+        key: String,
+        encodedValue: String,
+        updatedAt: String,
+        database: SQLiteDatabase
+    ) throws {
+        try database.execute(
+            """
+            INSERT INTO settings (
+                setting_key,
+                setting_value_json,
+                updated_at
+            ) VALUES (?, ?, ?)
+            ON CONFLICT(setting_key) DO UPDATE SET
+                setting_value_json = excluded.setting_value_json,
+                updated_at = excluded.updated_at;
+            """,
+            bindings: [
+                .text(key),
+                .text(encodedValue),
+                .text(updatedAt),
+            ]
+        )
+    }
+
+    private func ensureSpeciesCatalog(_ database: SQLiteDatabase) throws {
+        let now = ISO8601DateFormatter().string(from: Date())
+
+        for species in SpeciesCatalog.all {
+            try database.execute(
+                """
+                INSERT INTO species (
+                    species_id,
+                    name,
+                    field_code,
+                    rarity_tier,
+                    is_active,
+                    sort_order,
+                    asset_key,
+                    flavor_text,
+                    introduced_in_version,
+                    created_at,
+                    stat_planning,
+                    stat_design,
+                    stat_frontend,
+                    stat_backend,
+                    stat_pm,
+                    stat_infra,
+                    traits_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(species_id) DO UPDATE SET
+                    name = excluded.name,
+                    field_code = excluded.field_code,
+                    rarity_tier = excluded.rarity_tier,
+                    is_active = excluded.is_active,
+                    sort_order = excluded.sort_order,
+                    asset_key = excluded.asset_key,
+                    flavor_text = excluded.flavor_text,
+                    introduced_in_version = excluded.introduced_in_version,
+                    stat_planning = excluded.stat_planning,
+                    stat_design = excluded.stat_design,
+                    stat_frontend = excluded.stat_frontend,
+                    stat_backend = excluded.stat_backend,
+                    stat_pm = excluded.stat_pm,
+                    stat_infra = excluded.stat_infra,
+                    traits_json = excluded.traits_json;
+                """,
+                bindings: [
+                    .text(species.id),
+                    .text(species.name),
+                    .text(species.field.rawValue),
+                    .text(species.rarity.rawValue),
+                    .integer(species.isActive ? 1 : 0),
+                    .integer(Int64(species.sortOrder)),
+                    .text(species.assetKey),
+                    species.flavorText.map(SQLiteValue.text) ?? .null,
+                    .text(species.introducedInVersion),
+                    .text(now),
+                    .integer(Int64(species.stats.planning)),
+                    .integer(Int64(species.stats.design)),
+                    .integer(Int64(species.stats.frontend)),
+                    .integer(Int64(species.stats.backend)),
+                    .integer(Int64(species.stats.pm)),
+                    .integer(Int64(species.stats.infra)),
+                    .text(speciesTraitsJSON(species.stats.traits)),
+                ]
+            )
+        }
+    }
+
+    private func speciesTraitsJSON(_ traits: [String]) -> String {
+        guard let data = try? JSONEncoder().encode(traits),
+              let string = String(data: data, encoding: .utf8) else {
+            return "[]"
+        }
+        return string
+    }
+
+    private func currentExplorationState(database: SQLiteDatabase) throws -> ExplorationAccumulatorState {
+        guard let state = try database.fetchOne(
+            """
+            SELECT exploration_state_id,
+                   total_normalized_tokens,
+                   tokens_since_last_encounter,
+                   next_encounter_threshold_tokens,
+                   total_encounters,
+                   total_captures,
+                   last_usage_sample_id
+            FROM exploration_state
+            WHERE exploration_state_id = 1
+            LIMIT 1;
+            """,
+            map: { statement in
+            ExplorationAccumulatorState(
+                totalNormalizedTokens: SQLiteDatabase.columnInt64(statement, index: 1),
+                tokensSinceLastEncounter: SQLiteDatabase.columnInt64(statement, index: 2),
+                nextEncounterThresholdTokens: SQLiteDatabase.columnInt64(statement, index: 3),
+                totalEncounters: SQLiteDatabase.columnInt64(statement, index: 4),
+                totalCaptures: SQLiteDatabase.columnInt64(statement, index: 5)
+            )
+        }) else {
+            throw SQLiteError.statementFailed(
+                message: "missing exploration_state row",
+                sql: "SELECT ... FROM exploration_state WHERE exploration_state_id = 1"
+            )
+        }
+
+        return state
+    }
+
+    private func countRows(in table: String, database: SQLiteDatabase) throws -> Int {
+        Int(try database.fetchOne("SELECT COUNT(*) FROM \(table);") { statement in
+            SQLiteDatabase.columnInt64(statement, index: 0)
+        } ?? 0)
+    }
+
+    private var migrations: [SQLiteMigration] {
+        [
+            SQLiteMigration(version: 1, statements: [
+                """
+                CREATE TABLE IF NOT EXISTS providers (
+                    provider_code TEXT PRIMARY KEY NOT NULL,
+                    display_name TEXT NOT NULL,
+                    default_support_level TEXT NOT NULL,
+                    is_enabled INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS provider_sessions (
+                    provider_session_row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    provider_code TEXT NOT NULL REFERENCES providers(provider_code),
+                    provider_session_id TEXT NOT NULL,
+                    session_identity_kind TEXT NOT NULL,
+                    source_mode TEXT NOT NULL,
+                    model_slug TEXT,
+                    workspace_dir TEXT,
+                    transcript_path TEXT,
+                    started_at TEXT,
+                    ended_at TEXT,
+                    last_seen_at TEXT NOT NULL,
+                    session_state TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(provider_code, provider_session_id)
+                );
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS provider_health (
+                    provider_health_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    provider_code TEXT NOT NULL REFERENCES providers(provider_code),
+                    source_mode TEXT NOT NULL,
+                    health_state TEXT NOT NULL,
+                    message TEXT,
+                    last_success_at TEXT,
+                    last_error_at TEXT,
+                    last_error_code TEXT,
+                    last_error_summary TEXT,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(provider_code, source_mode)
+                );
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS ingest_sources (
+                    ingest_source_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_key TEXT NOT NULL UNIQUE,
+                    source_kind TEXT NOT NULL,
+                    source_path TEXT,
+                    last_offset INTEGER NOT NULL,
+                    last_line_number INTEGER NOT NULL,
+                    last_event_fingerprint TEXT,
+                    last_seen_at TEXT,
+                    updated_at TEXT NOT NULL
+                );
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS provider_ingest_events (
+                    provider_ingest_event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    provider_code TEXT NOT NULL REFERENCES providers(provider_code),
+                    source_mode TEXT NOT NULL,
+                    provider_session_row_id INTEGER REFERENCES provider_sessions(provider_session_row_id),
+                    ingest_source_id INTEGER REFERENCES ingest_sources(ingest_source_id),
+                    provider_event_fingerprint TEXT NOT NULL UNIQUE,
+                    raw_reference_kind TEXT NOT NULL,
+                    raw_reference_event_name TEXT,
+                    raw_reference_offset TEXT,
+                    observed_at TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    acceptance_state TEXT NOT NULL,
+                    rejection_reason TEXT,
+                    created_at TEXT NOT NULL
+                );
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS usage_samples (
+                    usage_sample_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    provider_ingest_event_id INTEGER NOT NULL UNIQUE REFERENCES provider_ingest_events(provider_ingest_event_id),
+                    provider_code TEXT NOT NULL REFERENCES providers(provider_code),
+                    provider_session_row_id INTEGER NOT NULL REFERENCES provider_sessions(provider_session_row_id),
+                    observed_at TEXT NOT NULL,
+                    total_input_tokens INTEGER NOT NULL,
+                    total_output_tokens INTEGER NOT NULL,
+                    total_cached_input_tokens INTEGER NOT NULL,
+                    normalized_total_tokens INTEGER NOT NULL CHECK(normalized_total_tokens >= 0),
+                    normalized_delta_tokens INTEGER NOT NULL CHECK(normalized_delta_tokens >= 0),
+                    current_input_tokens INTEGER,
+                    current_output_tokens INTEGER,
+                    gameplay_eligibility TEXT NOT NULL DEFAULT 'outside_live_runtime',
+                    gameplay_delta_tokens INTEGER NOT NULL DEFAULT 0,
+                    burst_intensity_band INTEGER NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS exploration_state (
+                    exploration_state_id INTEGER PRIMARY KEY NOT NULL,
+                    total_normalized_tokens INTEGER NOT NULL,
+                    pending_tokens INTEGER NOT NULL CHECK(pending_tokens >= 0),
+                    total_steps INTEGER NOT NULL,
+                    steps_since_last_encounter INTEGER NOT NULL CHECK(steps_since_last_encounter >= 0),
+                    total_encounters INTEGER NOT NULL,
+                    total_captures INTEGER NOT NULL,
+                    last_usage_sample_id INTEGER REFERENCES usage_samples(usage_sample_id),
+                    updated_at TEXT NOT NULL
+                );
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS species (
+                    species_id TEXT PRIMARY KEY NOT NULL,
+                    name TEXT NOT NULL,
+                    field_code TEXT NOT NULL,
+                    rarity_tier TEXT NOT NULL,
+                    is_active INTEGER NOT NULL,
+                    sort_order INTEGER NOT NULL,
+                    asset_key TEXT,
+                    flavor_text TEXT,
+                    introduced_in_version TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(field_code, name)
+                );
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS encounters (
+                    encounter_id TEXT PRIMARY KEY NOT NULL,
+                    encounter_sequence INTEGER NOT NULL UNIQUE,
+                    provider_code TEXT REFERENCES providers(provider_code),
+                    provider_session_row_id INTEGER REFERENCES provider_sessions(provider_session_row_id),
+                    usage_sample_id INTEGER NOT NULL REFERENCES usage_samples(usage_sample_id),
+                    threshold_event_index INTEGER NOT NULL,
+                    occurred_at TEXT NOT NULL,
+                    field_code TEXT NOT NULL,
+                    rarity_tier TEXT NOT NULL,
+                    species_id TEXT NOT NULL REFERENCES species(species_id),
+                    burst_intensity_band INTEGER NOT NULL,
+                    capture_probability REAL NOT NULL DEFAULT 0,
+                    capture_roll REAL NOT NULL DEFAULT 0,
+                    outcome TEXT NOT NULL DEFAULT 'escaped',
+                    created_at TEXT NOT NULL,
+                    UNIQUE(usage_sample_id, threshold_event_index)
+                );
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS dex_seen (
+                    species_id TEXT PRIMARY KEY NOT NULL REFERENCES species(species_id),
+                    first_seen_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    seen_count INTEGER NOT NULL CHECK(seen_count >= 1),
+                    last_encounter_id TEXT NOT NULL REFERENCES encounters(encounter_id),
+                    updated_at TEXT NOT NULL
+                );
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS dex_captured (
+                    species_id TEXT PRIMARY KEY NOT NULL REFERENCES species(species_id),
+                    first_captured_at TEXT NOT NULL,
+                    last_captured_at TEXT NOT NULL,
+                    captured_count INTEGER NOT NULL CHECK(captured_count >= 1),
+                    last_encounter_id TEXT NOT NULL REFERENCES encounters(encounter_id),
+                    updated_at TEXT NOT NULL
+                );
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS domain_events (
+                    domain_event_row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_id TEXT NOT NULL UNIQUE,
+                    event_type TEXT NOT NULL,
+                    occurred_at TEXT NOT NULL,
+                    producer TEXT NOT NULL,
+                    correlation_id TEXT,
+                    causation_id TEXT,
+                    aggregate_type TEXT,
+                    aggregate_id TEXT,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS settings (
+                    setting_key TEXT PRIMARY KEY NOT NULL,
+                    setting_value_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                """,
+                "CREATE INDEX IF NOT EXISTS idx_provider_sessions_provider_last_seen ON provider_sessions(provider_code, last_seen_at DESC);",
+                "CREATE INDEX IF NOT EXISTS idx_provider_ingest_events_provider_observed ON provider_ingest_events(provider_code, observed_at DESC);",
+                "CREATE INDEX IF NOT EXISTS idx_provider_ingest_events_acceptance_created ON provider_ingest_events(acceptance_state, created_at DESC);",
+                "CREATE INDEX IF NOT EXISTS idx_usage_samples_session_observed ON usage_samples(provider_session_row_id, observed_at);",
+                "CREATE INDEX IF NOT EXISTS idx_usage_samples_observed ON usage_samples(observed_at DESC);",
+                "CREATE INDEX IF NOT EXISTS idx_encounters_occurred ON encounters(occurred_at DESC);",
+                "CREATE INDEX IF NOT EXISTS idx_domain_events_event_type_occurred ON domain_events(event_type, occurred_at DESC);",
+            ]),
+            SQLiteMigration(version: 2, statements: [
+                """
+                CREATE TABLE IF NOT EXISTS backfill_runs (
+                    backfill_run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    provider_code TEXT NOT NULL REFERENCES providers(provider_code),
+                    provider_session_row_id INTEGER REFERENCES provider_sessions(provider_session_row_id),
+                    mode TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    status TEXT NOT NULL,
+                    samples_examined INTEGER NOT NULL,
+                    samples_created INTEGER NOT NULL,
+                    duplicates_skipped INTEGER NOT NULL,
+                    errors_count INTEGER NOT NULL,
+                    summary_json TEXT
+                );
+                """,
+                "CREATE INDEX IF NOT EXISTS idx_backfill_runs_provider_started ON backfill_runs(provider_code, started_at DESC);",
+            ]),
+            SQLiteMigration(version: 3, statements: [
+                """
+                UPDATE exploration_state
+                SET last_usage_sample_id = NULL,
+                    updated_at = STRFTIME('%Y-%m-%dT%H:%M:%fZ','now')
+                WHERE exploration_state_id = 1;
+                """,
+                "DELETE FROM backfill_runs;",
+                "DELETE FROM dex_captured;",
+                "DELETE FROM dex_seen;",
+                "DELETE FROM encounters;",
+                "DELETE FROM domain_events;",
+                "DELETE FROM usage_samples;",
+                "DELETE FROM provider_ingest_events;",
+                "DELETE FROM ingest_sources;",
+                "DELETE FROM provider_health;",
+                "DELETE FROM provider_sessions;",
+                "DELETE FROM species;",
+                """
+                UPDATE exploration_state
+                SET total_normalized_tokens = 0,
+                    pending_tokens = 0,
+                    total_steps = 0,
+                    steps_since_last_encounter = 0,
+                    total_encounters = 0,
+                    total_captures = 0,
+                    last_usage_sample_id = NULL,
+                    updated_at = STRFTIME('%Y-%m-%dT%H:%M:%fZ','now')
+                WHERE exploration_state_id = 1;
+                """,
+                """
+                INSERT INTO settings (
+                    setting_key,
+                    setting_value_json,
+                    updated_at
+                ) VALUES (
+                    'gameplay_started_at',
+                    json_quote(STRFTIME('%Y-%m-%dT%H:%M:%fZ','now')),
+                    STRFTIME('%Y-%m-%dT%H:%M:%fZ','now')
+                )
+                ON CONFLICT(setting_key) DO UPDATE SET
+                    setting_value_json = excluded.setting_value_json,
+                    updated_at = excluded.updated_at;
+                """,
+            ]),
+            SQLiteMigration(version: 4, statements: [
+                """
+                UPDATE exploration_state
+                SET last_usage_sample_id = NULL,
+                    updated_at = STRFTIME('%Y-%m-%dT%H:%M:%fZ','now')
+                WHERE exploration_state_id = 1;
+                """,
+                "DELETE FROM backfill_runs;",
+                "DELETE FROM dex_captured;",
+                "DELETE FROM dex_seen;",
+                "DELETE FROM encounters;",
+                "DELETE FROM domain_events;",
+                "DELETE FROM usage_samples;",
+                "DELETE FROM provider_ingest_events;",
+                "DELETE FROM ingest_sources;",
+                "DELETE FROM provider_health;",
+                "DELETE FROM provider_sessions;",
+                "DELETE FROM species;",
+                """
+                UPDATE exploration_state
+                SET total_normalized_tokens = 0,
+                    pending_tokens = 0,
+                    total_steps = 0,
+                    steps_since_last_encounter = 0,
+                    total_encounters = 0,
+                    total_captures = 0,
+                    last_usage_sample_id = NULL,
+                    updated_at = STRFTIME('%Y-%m-%dT%H:%M:%fZ','now')
+                WHERE exploration_state_id = 1;
+                """,
+                """
+                INSERT INTO settings (
+                    setting_key,
+                    setting_value_json,
+                    updated_at
+                ) VALUES (
+                    'gameplay_started_at',
+                    json_quote(STRFTIME('%Y-%m-%dT%H:%M:%fZ','now')),
+                    STRFTIME('%Y-%m-%dT%H:%M:%fZ','now')
+                )
+                ON CONFLICT(setting_key) DO UPDATE SET
+                    setting_value_json = excluded.setting_value_json,
+                    updated_at = excluded.updated_at;
+                """,
+            ]),
+            SQLiteMigration(version: 5, statements: [
+                "ALTER TABLE exploration_state RENAME TO exploration_state_legacy_v4;",
+                """
+                CREATE TABLE IF NOT EXISTS exploration_state (
+                    exploration_state_id INTEGER PRIMARY KEY NOT NULL,
+                    total_normalized_tokens INTEGER NOT NULL,
+                    tokens_since_last_encounter INTEGER NOT NULL CHECK(tokens_since_last_encounter >= 0),
+                    next_encounter_threshold_tokens INTEGER NOT NULL CHECK(next_encounter_threshold_tokens > 0),
+                    total_encounters INTEGER NOT NULL,
+                    total_captures INTEGER NOT NULL,
+                    last_usage_sample_id INTEGER REFERENCES usage_samples(usage_sample_id),
+                    updated_at TEXT NOT NULL
+                );
+                """,
+                """
+                INSERT INTO exploration_state (
+                    exploration_state_id,
+                    total_normalized_tokens,
+                    tokens_since_last_encounter,
+                    next_encounter_threshold_tokens,
+                    total_encounters,
+                    total_captures,
+                    last_usage_sample_id,
+                    updated_at
+                )
+                SELECT exploration_state_id,
+                       total_normalized_tokens,
+                       (steps_since_last_encounter * 200) + pending_tokens,
+                       1,
+                       total_encounters,
+                       total_captures,
+                       last_usage_sample_id,
+                       updated_at
+                FROM exploration_state_legacy_v4;
+                """,
+                "DROP TABLE exploration_state_legacy_v4;",
+            ]),
+            SQLiteMigration(version: 6, statements: [
+                """
+                INSERT INTO providers (
+                    provider_code,
+                    display_name,
+                    default_support_level,
+                    is_enabled,
+                    created_at,
+                    updated_at
+                ) VALUES (
+                    'gemini',
+                    'Gemini CLI',
+                    'first_class',
+                    1,
+                    strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                    strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                )
+                ON CONFLICT(provider_code) DO UPDATE SET
+                    display_name = excluded.display_name,
+                    default_support_level = excluded.default_support_level,
+                    is_enabled = 1,
+                    updated_at = excluded.updated_at;
+                """,
+            ]),
+            SQLiteMigration(version: 7, statements: [
+                "PRAGMA foreign_keys = OFF;",
+                """
+                CREATE TABLE IF NOT EXISTS usage_samples_v7 (
+                    usage_sample_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    provider_ingest_event_id INTEGER NOT NULL UNIQUE REFERENCES provider_ingest_events(provider_ingest_event_id),
+                    provider_code TEXT NOT NULL REFERENCES providers(provider_code),
+                    provider_session_row_id INTEGER NOT NULL REFERENCES provider_sessions(provider_session_row_id),
+                    observed_at TEXT NOT NULL,
+                    total_input_tokens INTEGER NOT NULL,
+                    total_output_tokens INTEGER NOT NULL,
+                    total_cached_input_tokens INTEGER NOT NULL,
+                    normalized_total_tokens INTEGER NOT NULL CHECK(normalized_total_tokens >= 0),
+                    normalized_delta_tokens INTEGER NOT NULL CHECK(normalized_delta_tokens >= 0),
+                    current_input_tokens INTEGER,
+                    current_output_tokens INTEGER,
+                    gameplay_eligibility TEXT NOT NULL DEFAULT 'outside_live_runtime',
+                    gameplay_delta_tokens INTEGER NOT NULL DEFAULT 0,
+                    burst_intensity_band INTEGER NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                """,
+                """
+                INSERT INTO usage_samples_v7 (
+                    usage_sample_id,
+                    provider_ingest_event_id,
+                    provider_code,
+                    provider_session_row_id,
+                    observed_at,
+                    total_input_tokens,
+                    total_output_tokens,
+                    total_cached_input_tokens,
+                    normalized_total_tokens,
+                    normalized_delta_tokens,
+                    current_input_tokens,
+                    current_output_tokens,
+                    gameplay_eligibility,
+                    gameplay_delta_tokens,
+                    burst_intensity_band,
+                    created_at
+                )
+                SELECT usage_sample_id,
+                       provider_ingest_event_id,
+                       provider_code,
+                       provider_session_row_id,
+                       observed_at,
+                       total_input_tokens,
+                       total_output_tokens,
+                       total_cached_input_tokens,
+                       normalized_total_tokens,
+                       normalized_delta_tokens,
+                       current_input_tokens,
+                       current_output_tokens,
+                       'outside_live_runtime',
+                       0,
+                       burst_intensity_band,
+                       created_at
+                FROM usage_samples;
+                """,
+                "DROP TABLE usage_samples;",
+                "ALTER TABLE usage_samples_v7 RENAME TO usage_samples;",
+                "CREATE INDEX IF NOT EXISTS idx_usage_samples_session_observed ON usage_samples(provider_session_row_id, observed_at);",
+                "CREATE INDEX IF NOT EXISTS idx_usage_samples_observed ON usage_samples(observed_at DESC);",
+                "CREATE INDEX IF NOT EXISTS idx_usage_samples_gameplay_eligibility ON usage_samples(gameplay_eligibility, observed_at DESC);",
+                "PRAGMA foreign_keys = ON;",
+            ], runsInTransaction: false),
+            SQLiteMigration(version: 8, statements: [
+                "ALTER TABLE species ADD COLUMN stat_planning INTEGER NOT NULL DEFAULT 1;",
+                "ALTER TABLE species ADD COLUMN stat_design INTEGER NOT NULL DEFAULT 1;",
+                "ALTER TABLE species ADD COLUMN stat_frontend INTEGER NOT NULL DEFAULT 1;",
+                "ALTER TABLE species ADD COLUMN stat_backend INTEGER NOT NULL DEFAULT 1;",
+                "ALTER TABLE species ADD COLUMN stat_pm INTEGER NOT NULL DEFAULT 1;",
+                "ALTER TABLE species ADD COLUMN stat_infra INTEGER NOT NULL DEFAULT 1;",
+                "ALTER TABLE species ADD COLUMN traits_json TEXT NOT NULL DEFAULT '[]';",
+            ]),
+            SQLiteMigration(version: 9, statements: [
+                """
+                CREATE TABLE IF NOT EXISTS party_members (
+                    species_id TEXT NOT NULL PRIMARY KEY
+                        REFERENCES species(species_id) ON DELETE CASCADE,
+                    slot_order INTEGER NOT NULL,
+                    added_at TEXT NOT NULL
+                );
+                """,
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_party_members_slot ON party_members(slot_order);",
+            ]),
+        ]
+    }
+}

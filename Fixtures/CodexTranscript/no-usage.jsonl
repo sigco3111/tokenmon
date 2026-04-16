@@ -1,0 +1,2 @@
+{"timestamp":"2026-04-04T00:41:00Z","type":"session_meta","payload":{"id":"codex_transcript_fixture","timestamp":"2026-04-04T00:40:50Z","cwd":"/tmp/tokenmon-fixture","originator":"codex-tui","source":"cli","model":"gpt-5.4"}}
+{"timestamp":"2026-04-04T00:41:05Z","type":"event_msg","payload":{"type":"token_count","info":null}}

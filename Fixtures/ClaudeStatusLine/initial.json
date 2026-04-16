@@ -1,0 +1,25 @@
+{
+  "cwd": "/tmp/tokenmon-fixture",
+  "session_id": "claude_statusline_fixture",
+  "transcript_path": "/tmp/claude-statusline-fixture.jsonl",
+  "model": {
+    "id": "claude-opus-4-1",
+    "display_name": "Opus"
+  },
+  "workspace": {
+    "current_dir": "/tmp/tokenmon-fixture"
+  },
+  "cost": {
+    "total_cost_usd": 0.01234
+  },
+  "context_window": {
+    "total_input_tokens": 1200,
+    "total_output_tokens": 600,
+    "current_usage": {
+      "input_tokens": 1200,
+      "output_tokens": 600,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+    }
+  }
+}

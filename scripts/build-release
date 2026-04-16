@@ -1,0 +1,300 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+output_path="$ROOT/.build/release-artifacts"
+app_icon_source="$ROOT/assets/app-icon/tokenmon-icon-1024.png"
+plist_template="$ROOT/Packaging/Tokenmon-Info.plist"
+bundle_id="${BUNDLE_ID:-com.aroido.tokenmon}"
+repository_target="${TOKENMON_GITHUB_REPOSITORY:-$("$ROOT/scripts/tokenmon-release-targets" repository)}"
+scratch_path="${TOKENMON_RELEASE_SCRATCH_PATH:-}"
+sparkle_public_ed_key="${SPARKLE_PUBLIC_ED_KEY:-}"
+sparkle_public_key_source="environment"
+sparkle_feed_url="${TOKENMON_SPARKLE_FEED_URL:-$("$ROOT/scripts/tokenmon-release-targets" default-feed-url "$repository_target")}"
+timing_report="${TOKENMON_TIMING_REPORT:-}"
+version="${VERSION:-}"
+build_number="${BUILD_NUMBER:-}"
+git_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+git_commit_short="$(git rev-parse --short HEAD 2>/dev/null || true)"
+git_dirty="false"
+clean_release="false"
+
+timing_now() {
+  python3 - <<'PY'
+import time
+print(f"{time.time():.6f}")
+PY
+}
+
+record_timing() {
+  local category="$1"
+  local step="$2"
+  local started_at="$3"
+  local ended_at
+  local duration
+
+  ended_at="$(timing_now)"
+  duration="$(python3 - "$started_at" "$ended_at" <<'PY'
+import sys
+start = float(sys.argv[1])
+end = float(sys.argv[2])
+print(f"{end - start:.3f}")
+PY
+)"
+
+  printf 'TIMING: category=%s step=%s duration_seconds=%s\n' "$category" "$step" "$duration"
+  if [[ -n "$timing_report" ]]; then
+    printf 'category=%s step=%s duration_seconds=%s\n' "$category" "$step" "$duration" >>"$timing_report"
+  fi
+}
+
+swift_cmd() {
+  local action="$1"
+  shift
+  local developer_dir="${DEVELOPER_DIR:-}"
+  if [[ -z "$developer_dir" && -n "${MD_APPLE_SDK_ROOT:-}" ]]; then
+    developer_dir="${MD_APPLE_SDK_ROOT}/Contents/Developer"
+  fi
+  if [[ -n "$developer_dir" && ! -d "$developer_dir" ]]; then
+    developer_dir=""
+  fi
+  if [[ "$(uname -s)" == "Darwin" ]] && command -v xcrun >/dev/null 2>&1; then
+    if [[ -n "$developer_dir" ]]; then
+      if [[ -n "$scratch_path" ]]; then
+        DEVELOPER_DIR="$developer_dir" xcrun swift "$action" --scratch-path "$scratch_path" "$@"
+      else
+        DEVELOPER_DIR="$developer_dir" xcrun swift "$action" "$@"
+      fi
+    else
+      if [[ -n "$scratch_path" ]]; then
+        xcrun swift "$action" --scratch-path "$scratch_path" "$@"
+      else
+        xcrun swift "$action" "$@"
+      fi
+    fi
+    return
+  fi
+  if [[ -n "$scratch_path" ]]; then
+    swift "$action" --scratch-path "$scratch_path" "$@"
+  else
+    swift "$action" "$@"
+  fi
+}
+if [[ -n "$(git status --short 2>/dev/null || true)" ]]; then
+  git_dirty="true"
+fi
+
+[[ -f "$plist_template" ]] || { printf 'Missing Info.plist template: %s\n' "$plist_template" >&2; exit 1; }
+
+if [[ -z "$version" ]]; then
+  version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist_template")"
+fi
+
+if [[ -z "$build_number" ]]; then
+  build_number="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist_template")"
+fi
+
+plist_set_string() {
+  local key="$1"
+  local value="$2"
+  /usr/libexec/PlistBuddy -c "Delete :$key" "$app_plist" >/dev/null 2>&1 || true
+  /usr/libexec/PlistBuddy -c "Add :$key string $value" "$app_plist"
+}
+
+plist_set_bool() {
+  local key="$1"
+  local value="$2"
+  /usr/libexec/PlistBuddy -c "Delete :$key" "$app_plist" >/dev/null 2>&1 || true
+  /usr/libexec/PlistBuddy -c "Add :$key bool $value" "$app_plist"
+}
+
+find_sparkle_framework() {
+  local preferred="$1"
+  if [[ -d "$preferred" ]]; then
+    printf '%s\n' "$preferred"
+    return 0
+  fi
+
+  find "$ROOT/.build" \( -type d -o -type l \) -path '*/Sparkle.framework' -print 2>/dev/null | sort | head -n 1
+}
+
+normalize_single_line_value() {
+  printf '%s' "$1" | tr -d '\r' | awk '{
+    gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
+    if (length($0) > 0) {
+      print $0
+      exit
+    }
+  }'
+}
+
+resolve_sparkle_public_key() {
+  if [[ -n "$sparkle_public_ed_key" ]]; then
+    sparkle_public_key_source="environment"
+    return
+  fi
+
+  if [[ "${TOKENMON_DISABLE_GH_SPARKLE_PUBLIC_KEY_FALLBACK:-0}" == "1" ]]; then
+    sparkle_public_key_source="missing"
+    return
+  fi
+
+  if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    local fetched_key
+    fetched_key="$(gh variable get SPARKLE_PUBLIC_ED_KEY --repo "$repository_target" 2>/dev/null || true)"
+    fetched_key="$(normalize_single_line_value "$fetched_key")"
+    if [[ -n "$fetched_key" ]]; then
+      sparkle_public_ed_key="$fetched_key"
+      sparkle_public_key_source="github_variable"
+      return
+    fi
+  fi
+
+  sparkle_public_key_source="missing"
+}
+
+resolve_sparkle_public_key
+if [[ "$sparkle_public_key_source" == "missing" ]]; then
+  printf 'WARNING: Sparkle public key is missing. Local release bundles will not enable in-app updates unless SPARKLE_PUBLIC_ED_KEY is set or gh can read the repo variable.\n' >&2
+fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --output)
+      shift
+      output_path="${1:-}"
+      ;;
+    --scratch-path)
+      shift
+      scratch_path="${1:-}"
+      ;;
+    --clean)
+      clean_release="true"
+      ;;
+    *)
+      printf 'Unsupported argument: %s\n' "$1" >&2
+      printf 'Usage: ./scripts/build-release [--output <path>] [--scratch-path <path>] [--clean]\n' >&2
+      exit 2
+      ;;
+  esac
+  shift || true
+done
+
+rm -rf "$output_path"
+mkdir -p "$output_path"
+
+build_started_at="$(timing_now)"
+if [[ "$clean_release" == "true" ]]; then
+  swift_cmd package clean
+fi
+swift_cmd build -c release
+bin_path="$(swift_cmd build -c release --show-bin-path)"
+record_timing "build" "swift_release_build" "$build_started_at"
+
+app_src="$bin_path/TokenmonApp"
+app_bundle="$output_path/Tokenmon.app"
+app_macos_dir="$app_bundle/Contents/MacOS"
+app_frameworks_dir="$app_bundle/Contents/Frameworks"
+app_resources_dir="$app_bundle/Contents/Resources"
+app_plist="$app_bundle/Contents/Info.plist"
+app_resource_bundle_src="$bin_path/Tokenmon_TokenmonApp.bundle"
+app_resource_bundle_dst="$app_resources_dir/Tokenmon_TokenmonApp.bundle"
+sparkle_framework_src="$(find_sparkle_framework "$bin_path/Sparkle.framework")"
+app_icon_icns="$app_resources_dir/AppIcon.icns"
+release_notes="$output_path/RELEASE_NOTES.txt"
+first_run_checklist="$output_path/FIRST_RUN_CHECKLIST.txt"
+
+[[ -x "$app_src" ]] || { printf 'Missing app binary: %s\n' "$app_src" >&2; exit 1; }
+[[ -n "$sparkle_framework_src" ]] || { printf 'Missing Sparkle.framework in .build artifacts. Resolve SwiftPM dependencies before building release.\n' >&2; exit 1; }
+
+packaging_started_at="$(timing_now)"
+mkdir -p "$app_macos_dir" "$app_frameworks_dir" "$app_resources_dir"
+cp "$app_src" "$app_macos_dir/TokenmonApp"
+chmod +x "$app_macos_dir/TokenmonApp"
+
+if [[ -d "$app_resource_bundle_src" ]]; then
+  cp -R "$app_resource_bundle_src" "$app_resource_bundle_dst"
+fi
+
+ditto "$sparkle_framework_src" "$app_frameworks_dir/Sparkle.framework"
+
+[[ -f "$app_icon_source" ]] || { printf 'Missing app icon source: %s\n' "$app_icon_source" >&2; exit 1; }
+
+iconset_dir="$output_path/AppIcon.iconset"
+rm -rf "$iconset_dir"
+mkdir -p "$iconset_dir"
+trap 'rm -rf "$iconset_dir"' EXIT
+
+create_icon() {
+  local size="$1"
+  local name="$2"
+  sips -s format png -z "$size" "$size" "$app_icon_source" --out "$iconset_dir/$name" >/dev/null
+}
+
+create_icon 16 icon_16x16.png
+create_icon 32 icon_16x16@2x.png
+create_icon 32 icon_32x32.png
+create_icon 64 icon_32x32@2x.png
+create_icon 128 icon_128x128.png
+create_icon 256 icon_128x128@2x.png
+create_icon 256 icon_256x256.png
+create_icon 512 icon_256x256@2x.png
+create_icon 512 icon_512x512.png
+create_icon 1024 icon_512x512@2x.png
+
+iconutil -c icns "$iconset_dir" -o "$app_icon_icns"
+
+cp "$plist_template" "$app_plist"
+
+plist_set_string "CFBundleIdentifier" "$bundle_id"
+plist_set_string "CFBundleShortVersionString" "$version"
+plist_set_string "CFBundleVersion" "$build_number"
+plist_set_string "TokenmonGitBranch" "$git_branch"
+plist_set_string "TokenmonGitCommitShort" "$git_commit_short"
+plist_set_bool "TokenmonGitDirty" "$git_dirty"
+plist_set_string "TokenmonGitHubRepository" "$repository_target"
+plist_set_string "SUFeedURL" "$sparkle_feed_url"
+if [[ -n "$sparkle_public_ed_key" ]]; then
+  plist_set_string "SUPublicEDKey" "$sparkle_public_ed_key"
+else
+  /usr/libexec/PlistBuddy -c "Delete :SUPublicEDKey" "$app_plist" >/dev/null 2>&1 || true
+fi
+
+# Re-sign the assembled app bundle after writing Info.plist and resources so
+# macOS sees one coherent bundle identity instead of the raw SwiftPM binary
+# signature copied out of .build.
+codesign --force --deep --sign - "$app_bundle"
+record_timing "release_packaging" "assemble_release_bundle" "$packaging_started_at"
+
+cat >"$release_notes" <<'NOTES'
+Tokenmon local release build
+
+Included:
+- Tokenmon native menubar app with Dex and Settings
+- Claude status line and hook onboarding owned by the app
+- Codex best-effort observation hooks owned by the app
+- Sparkle-powered signed app updates for release builds
+- restart/replay safety verification lane
+
+Developer Tools are hidden in release bundles and are available only from debug builds.
+NOTES
+
+cat >"$first_run_checklist" <<'CHECKLIST'
+Tokenmon first-run checklist
+
+1. Launch the menubar app:
+   open "Tokenmon.app"
+2. Open Tokenmon Settings from the menu bar.
+3. Connect Claude or Codex from the Providers pane.
+4. Let Tokenmon observe local usage and build Dex progress.
+5. Developer Tools are available only from debug builds.
+CHECKLIST
+
+printf 'release_output=%s\n' "$output_path"
+printf 'app_bundle=%s\n' "$app_bundle"
+printf 'app_icon=%s\n' "$app_icon_icns"
+printf 'sparkle_public_key_source=%s\n' "$sparkle_public_key_source"
+printf 'release_notes=%s\n' "$release_notes"
+printf 'first_run_checklist=%s\n' "$first_run_checklist"

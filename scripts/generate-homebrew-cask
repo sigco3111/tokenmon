@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PLIST_TEMPLATE="$ROOT/Packaging/Tokenmon-Info.plist"
+
+version=""
+sha256=""
+repository=""
+asset_name=""
+output_path=""
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./scripts/generate-homebrew-cask --version <version> --sha256 <sha256> [--repo <owner/name>] [--asset-name <file>] [--output <path>]
+
+Examples:
+  ./scripts/generate-homebrew-cask --version 0.1.1 --sha256 <sha>
+  ./scripts/generate-homebrew-cask --version 0.1.1 --sha256 <sha> --output dist/releases/tokenmon.rb
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --version)
+      shift
+      version="${1:-}"
+      ;;
+    --sha256)
+      shift
+      sha256="${1:-}"
+      ;;
+    --repo)
+      shift
+      repository="${1:-}"
+      ;;
+    --asset-name)
+      shift
+      asset_name="${1:-}"
+      ;;
+    --output)
+      shift
+      output_path="${1:-}"
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      printf 'Unsupported argument: %s\n' "$1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift || true
+done
+
+[[ -n "$version" ]] || { printf 'Missing --version\n' >&2; usage >&2; exit 1; }
+[[ -n "$sha256" ]] || { printf 'Missing --sha256\n' >&2; usage >&2; exit 1; }
+
+if [[ -z "$repository" ]]; then
+  [[ -f "$PLIST_TEMPLATE" ]] || { printf 'Missing Info.plist template: %s\n' "$PLIST_TEMPLATE" >&2; exit 1; }
+  repository="$(/usr/libexec/PlistBuddy -c 'Print :TokenmonGitHubRepository' "$PLIST_TEMPLATE")"
+fi
+
+[[ "$repository" == */* ]] || { printf 'Repository must be in owner/name form: %s\n' "$repository" >&2; exit 1; }
+[[ "$sha256" =~ ^[0-9a-f]{64}$ ]] || { printf 'Invalid SHA-256: %s\n' "$sha256" >&2; exit 1; }
+
+if [[ -z "$asset_name" ]]; then
+  asset_name='Tokenmon-#{version}.dmg'
+fi
+
+rendered_cask="$(cat <<EOF
+cask "tokenmon" do
+  version "${version}"
+  sha256 "${sha256}"
+
+  url "https://github.com/${repository}/releases/download/v#{version}/${asset_name}"
+  name "Tokenmon"
+  desc "Offline-first menu bar creature companion for local AI coding"
+  homepage "https://github.com/${repository}"
+
+  auto_updates true
+
+  depends_on macos: ">= :sonoma"
+
+  app "Tokenmon.app"
+
+  zap trash: [
+    "~/Library/Application Support/Tokenmon",
+  ]
+end
+EOF
+)"
+
+if [[ -n "$output_path" ]]; then
+  mkdir -p "$(dirname "$output_path")"
+  printf '%s\n' "$rendered_cask" > "$output_path"
+  printf 'cask_output=%s\n' "$output_path"
+else
+  printf '%s\n' "$rendered_cask"
+fi

@@ -1,0 +1,36 @@
+changelog:
+  exclude:
+    labels:
+      - skip-changelog
+      - internal
+  categories:
+    - title: New Features
+      labels:
+        - feature
+        - enhancement
+        - gameplay
+    - title: Provider and Ingest
+      labels:
+        - provider
+        - ingest
+        - codex
+        - claude
+        - gemini
+    - title: UI and UX
+      labels:
+        - ui
+        - ux
+        - design
+    - title: Fixes
+      labels:
+        - fix
+        - bug
+        - regression
+    - title: Docs and Workflow
+      labels:
+        - docs
+        - release
+        - tooling
+    - title: Everything Else
+      labels:
+        - "*"

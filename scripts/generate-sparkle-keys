@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./scripts/generate-sparkle-keys --private-key-out <path>
+
+Generates a Sparkle-compatible Ed25519 keypair.
+The public key is printed to stdout and can be stored in a repo variable.
+The private key is written to the output path and should be stored as a secret.
+EOF
+}
+
+private_key_out=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --private-key-out)
+      shift
+      private_key_out="${1:-}"
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      printf 'Unsupported argument: %s\n' "$1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift || true
+done
+
+[[ -n "$private_key_out" ]] || { printf 'Missing --private-key-out\n' >&2; usage >&2; exit 1; }
+
+mkdir -p "$(dirname "$private_key_out")"
+umask 077
+
+swift_output="$(
+  swift - <<'SWIFT'
+import CryptoKit
+import Foundation
+
+let key = Curve25519.Signing.PrivateKey()
+print("public_key=\(Data(key.publicKey.rawRepresentation).base64EncodedString())")
+print("private_key=\(Data(key.rawRepresentation).base64EncodedString())")
+SWIFT
+)"
+
+public_key="$(printf '%s\n' "$swift_output" | sed -n 's/^public_key=//p')"
+private_key="$(printf '%s\n' "$swift_output" | sed -n 's/^private_key=//p')"
+
+[[ -n "$public_key" ]] || { printf 'Failed to generate public key\n' >&2; exit 1; }
+[[ -n "$private_key" ]] || { printf 'Failed to generate private key\n' >&2; exit 1; }
+
+printf '%s\n' "$private_key" > "$private_key_out"
+chmod 600 "$private_key_out"
+
+printf 'public_key=%s\n' "$public_key"
+printf 'private_key_path=%s\n' "$private_key_out"

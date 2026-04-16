@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  TOKENMON_XCODE_VERSION: '26.4'
+
+jobs:
+  verify-pr:
+    if: github.event_name == 'pull_request'
+    runs-on: macos-26
+    env:
+      TOKENMON_VERIFY_SCRATCH_PATH: ${{ github.workspace }}/.build/ci-pr
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Select latest Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: ${{ env.TOKENMON_XCODE_VERSION }}
+
+      - name: Validate Xcode
+        run: |
+          xcode_version="$(xcodebuild -version)"
+          printf '%s\n' "$xcode_version"
+          printf '%s\n' "$xcode_version" | grep -q "^Xcode ${{ env.TOKENMON_XCODE_VERSION }}"
+
+      - name: Restore SwiftPM cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            ${{ env.TOKENMON_VERIFY_SCRATCH_PATH }}
+          key: ${{ runner.os }}-xcode-${{ env.TOKENMON_XCODE_VERSION }}-lane-pr-${{ hashFiles('Package.resolved', 'Packaging/Tokenmon-Info.plist', 'scripts/**', '.github/workflows/**') }}
+          restore-keys: |
+            ${{ runner.os }}-xcode-${{ env.TOKENMON_XCODE_VERSION }}-lane-pr-
+            ${{ runner.os }}-xcode-${{ env.TOKENMON_XCODE_VERSION }}-
+
+      - name: Run PR verification
+        run: ./scripts/ai-verify --mode pr
+
+  verify-main:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: macos-26
+    env:
+      TOKENMON_VERIFY_SCRATCH_PATH: ${{ github.workspace }}/.build/ci-main
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Select latest Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: ${{ env.TOKENMON_XCODE_VERSION }}
+
+      - name: Validate Xcode
+        run: |
+          xcode_version="$(xcodebuild -version)"
+          printf '%s\n' "$xcode_version"
+          printf '%s\n' "$xcode_version" | grep -q "^Xcode ${{ env.TOKENMON_XCODE_VERSION }}"
+
+      - name: Restore SwiftPM cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            ${{ env.TOKENMON_VERIFY_SCRATCH_PATH }}
+          key: ${{ runner.os }}-xcode-${{ env.TOKENMON_XCODE_VERSION }}-lane-main-${{ hashFiles('Package.resolved', 'Packaging/Tokenmon-Info.plist', 'scripts/**', '.github/workflows/**') }}
+          restore-keys: |
+            ${{ runner.os }}-xcode-${{ env.TOKENMON_XCODE_VERSION }}-lane-main-
+            ${{ runner.os }}-xcode-${{ env.TOKENMON_XCODE_VERSION }}-
+
+      - name: Run main verification
+        run: ./scripts/ai-verify --mode main

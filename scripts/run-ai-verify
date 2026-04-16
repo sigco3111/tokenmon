@@ -1,0 +1,1964 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+worker_tag="${OMX_TEAM_WORKER:-manual}"
+worker_tag="${worker_tag//\//-}"
+scratch_root_default="$ROOT/.build/verify-$worker_tag"
+scratch_path="${TOKENMON_VERIFY_SCRATCH_PATH:-$scratch_root_default}"
+if [[ "${TOKENMON_VERIFY_UNIQUE_SCRATCH:-0}" == "1" ]]; then
+  scratch_path="$scratch_path-$$"
+fi
+tokenmon_app_bin=""
+include_release_tooling=0
+include_readme_screenshots=0
+timing_report="${TOKENMON_TIMING_REPORT:-}"
+
+timing_now() {
+  python3 - <<'PY'
+import time
+print(f"{time.time():.6f}")
+PY
+}
+
+record_timing() {
+  local category="$1"
+  local step="$2"
+  local started_at="$3"
+  local ended_at
+  local duration
+
+  ended_at="$(timing_now)"
+  duration="$(python3 - "$started_at" "$ended_at" <<'PY'
+import sys
+start = float(sys.argv[1])
+end = float(sys.argv[2])
+print(f"{end - start:.3f}")
+PY
+)"
+
+  printf 'TIMING: category=%s step=%s duration_seconds=%s\n' "$category" "$step" "$duration"
+  if [[ -n "$timing_report" ]]; then
+    printf 'category=%s step=%s duration_seconds=%s\n' "$category" "$step" "$duration" >>"$timing_report"
+  fi
+}
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./scripts/run-ai-verify [--include-release-tooling] [--include-readme-screenshots] [--timing-report <path>]
+
+Options:
+  --include-release-tooling   Run release-archive, Homebrew cask, Sparkle appcast, and tap-sync dry runs.
+  --include-readme-screenshots
+                              Generate README PNG and GIF media after the core verification lane.
+  --timing-report <path>      Append machine-readable timing summary lines to the given file.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --include-release-tooling)
+      include_release_tooling=1
+      ;;
+    --include-readme-screenshots)
+      include_readme_screenshots=1
+      ;;
+    --timing-report)
+      shift
+      timing_report="${1:-}"
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      printf 'Unsupported argument: %s\n' "$1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift || true
+done
+
+swift_cmd() {
+  local action="$1"
+  shift
+  local developer_dir="${DEVELOPER_DIR:-}"
+  if [[ -z "$developer_dir" && -n "${MD_APPLE_SDK_ROOT:-}" ]]; then
+    developer_dir="${MD_APPLE_SDK_ROOT}/Contents/Developer"
+  fi
+  if [[ -n "$developer_dir" && ! -d "$developer_dir" ]]; then
+    developer_dir=""
+  fi
+  if [[ "$(uname -s)" == "Darwin" ]] && command -v xcrun >/dev/null 2>&1; then
+    if [[ -n "$developer_dir" ]]; then
+      DEVELOPER_DIR="$developer_dir" xcrun swift "$action" --scratch-path "$scratch_path" "$@"
+    else
+      xcrun swift "$action" --scratch-path "$scratch_path" "$@"
+    fi
+    return
+  fi
+  swift "$action" --scratch-path "$scratch_path" "$@"
+}
+
+tokenmon_app_cmd() {
+  if [[ -z "$tokenmon_app_bin" ]]; then
+    printf 'VERIFY FAIL: tokenmon_app_bin is not initialized\n' >&2
+    exit 1
+  fi
+  "$tokenmon_app_bin" "$@"
+}
+
+require_contains() {
+  local haystack="$1"
+  local needle="$2"
+  if [[ "$haystack" != *"$needle"* ]]; then
+    printf 'VERIFY FAIL: expected output to contain %s\n' "$needle" >&2
+    exit 1
+  fi
+}
+
+have_repo_paths() {
+  local relative_path
+  for relative_path in "$@"; do
+    [[ -e "$ROOT/$relative_path" ]] || return 1
+  done
+  return 0
+}
+
+public_release_repo="$("$ROOT/scripts/tokenmon-release-targets" repository)"
+public_release_feed_url="$("$ROOT/scripts/tokenmon-release-targets" default-feed-url "$public_release_repo")"
+has_species_art_tooling=0
+has_repo_workflow_tooling=0
+has_public_export_tooling=0
+
+if have_repo_paths \
+  "scripts/sync-species-art-manifest" \
+  "scripts/build-species-animation-assets" \
+  "scripts/render-species-contact-sheets" \
+  "art/source" \
+  "assets/sprites/species"
+then
+  has_species_art_tooling=1
+fi
+
+if have_repo_paths \
+  "scripts/audit-codex-global-setup" \
+  "scripts/tokenmon-codex-workflow-status" \
+  "scripts/tokenmon-dev-workflow" \
+  "scripts/repair-codex-global-setup" \
+  ".codex/hooks/stop_verify_reminder.sh" \
+  ".agents/skills"
+then
+  has_repo_workflow_tooling=1
+fi
+
+if have_repo_paths \
+  "scripts/export-public-repo" \
+  "scripts/audit-public-export" \
+  "PublicExport/include-paths.txt" \
+  "PublicExport/overlay/README.md"
+then
+  has_public_export_tooling=1
+fi
+
+require_any_contains() {
+  local haystack="$1"
+  shift
+
+  local needle
+  for needle in "$@"; do
+    if [[ "$haystack" == *"$needle"* ]]; then
+      return 0
+    fi
+  done
+
+  printf 'VERIFY FAIL: expected output to contain one of: %s\n' "$*" >&2
+  exit 1
+}
+
+require_integer_at_least() {
+  local value="$1"
+  local minimum="$2"
+  local label="$3"
+  if [[ "$value" =~ ^[0-9]+$ ]] && (( value >= minimum )); then
+    return 0
+  fi
+
+  printf 'VERIFY FAIL: expected %s >= %s but got %s\n' "$label" "$minimum" "$value" >&2
+  exit 1
+}
+
+probe_value() {
+  local probe_output="$1"
+  local key="$2"
+  printf '%s\n' "$probe_output" | awk -F= -v key="$key" '$1 == key { print substr($0, index($0, "=") + 1) }'
+}
+
+probe_cli_lane() {
+  local database_path="$1"
+  python3 - "$database_path" <<'PY'
+import sqlite3
+import sys
+
+db_path = sys.argv[1]
+db = sqlite3.connect(db_path)
+cur = db.cursor()
+
+row = cur.execute(
+    """
+    SELECT total_normalized_tokens,
+           tokens_since_last_encounter,
+           next_encounter_threshold_tokens,
+           total_encounters,
+           total_captures
+    FROM exploration_state
+    WHERE exploration_state_id = 1;
+    """
+).fetchone()
+
+if row is None:
+    row = (0, 0, 0, 0, 0)
+
+recent_encounters = cur.execute("SELECT COUNT(*) FROM encounters;").fetchone()[0]
+dex_seen_entries = cur.execute("SELECT COUNT(*) FROM dex_seen;").fetchone()[0]
+dex_captured_entries = cur.execute("SELECT COUNT(*) FROM dex_captured;").fetchone()[0]
+
+labels = (
+    "total_normalized_tokens",
+    "tokens_since_last_encounter",
+    "next_encounter_threshold_tokens",
+    "total_encounters",
+    "total_captures",
+)
+
+for label, value in zip(labels, row):
+    print(f"{label}={value}")
+
+print(f"tokens_until_next_encounter={max(0, row[2] - row[1])}")
+
+print(f"recent_encounters={recent_encounters}")
+print(f"dex_seen_entries={dex_seen_entries}")
+print(f"dex_captured_entries={dex_captured_entries}")
+PY
+}
+
+probe_ingest_source() {
+  local database_path="$1"
+  local source_key="$2"
+  python3 - "$database_path" "$source_key" <<'PY'
+import sqlite3
+import sys
+
+db_path = sys.argv[1]
+source_key = sys.argv[2]
+db = sqlite3.connect(db_path)
+cur = db.cursor()
+
+row = cur.execute(
+    """
+    SELECT last_offset,
+           last_line_number,
+           COALESCE(last_event_fingerprint, '')
+    FROM ingest_sources
+    WHERE source_key = ?
+    LIMIT 1;
+    """,
+    (source_key,),
+).fetchone()
+
+if row is None:
+    print("source_found=0")
+    sys.exit(0)
+
+print("source_found=1")
+print(f"last_offset={row[0]}")
+print(f"last_line_number={row[1]}")
+print(f"last_event_fingerprint={row[2]}")
+PY
+}
+
+probe_encounter_lane() {
+  local database_path="$1"
+  local expected_threshold_count="$2"
+  python3 - "$database_path" "$expected_threshold_count" <<'PY'
+import json
+import math
+import sqlite3
+import sys
+
+db_path = sys.argv[1]
+expected_threshold_count = int(sys.argv[2])
+
+db = sqlite3.connect(db_path)
+cur = db.cursor()
+
+expected_probabilities = {
+    "common": 0.88,
+    "uncommon": 0.68,
+    "rare": 0.36,
+    "epic": 0.16,
+    "legendary": 0.06,
+}
+
+encounters = cur.execute(
+    """
+    SELECT encounter_id,
+           encounter_sequence,
+           threshold_event_index,
+           species_id,
+           field_code,
+           rarity_tier,
+           capture_probability,
+           capture_roll,
+           outcome
+    FROM encounters
+    ORDER BY encounter_sequence ASC;
+    """
+).fetchall()
+encounter_count = len(encounters)
+encounter_by_id = {row[0]: row for row in encounters}
+encounter_species = {row[3] for row in encounters}
+captured_species = {row[3] for row in encounters if row[8] == "captured"}
+captured_count = sum(1 for row in encounters if row[8] == "captured")
+
+dex_seen_rows = cur.execute(
+    "SELECT species_id, last_encounter_id FROM dex_seen ORDER BY species_id ASC;"
+).fetchall()
+dex_captured_rows = cur.execute(
+    "SELECT species_id, last_encounter_id FROM dex_captured ORDER BY species_id ASC;"
+).fetchall()
+dex_seen_species = {row[0] for row in dex_seen_rows}
+dex_captured_species = {row[0] for row in dex_captured_rows}
+
+threshold_event_count = cur.execute(
+    "SELECT COUNT(*) FROM domain_events WHERE event_type = 'encounter_threshold_crossed';"
+).fetchone()[0]
+field_selected_count = cur.execute(
+    "SELECT COUNT(*) FROM domain_events WHERE event_type = 'field_selected';"
+).fetchone()[0]
+rarity_selected_count = cur.execute(
+    "SELECT COUNT(*) FROM domain_events WHERE event_type = 'rarity_selected';"
+).fetchone()[0]
+species_selected_count = cur.execute(
+    "SELECT COUNT(*) FROM domain_events WHERE event_type = 'species_selected';"
+).fetchone()[0]
+encounter_spawned_count = cur.execute(
+    "SELECT COUNT(*) FROM domain_events WHERE event_type = 'encounter_spawned';"
+).fetchone()[0]
+capture_resolved_rows = cur.execute(
+    """
+    SELECT aggregate_id, payload_json
+    FROM domain_events
+    WHERE event_type = 'capture_resolved'
+    ORDER BY domain_event_row_id ASC;
+    """
+).fetchall()
+capture_resolved_event_count = len(capture_resolved_rows)
+seen_dex_updated_count = cur.execute(
+    "SELECT COUNT(*) FROM domain_events WHERE event_type = 'seen_dex_updated';"
+).fetchone()[0]
+captured_dex_updated_count = cur.execute(
+    "SELECT COUNT(*) FROM domain_events WHERE event_type = 'captured_dex_updated';"
+).fetchone()[0]
+domain_event_count = cur.execute("SELECT COUNT(*) FROM domain_events;").fetchone()[0]
+state_total_encounters, state_total_captures = cur.execute(
+    "SELECT total_encounters, total_captures FROM exploration_state WHERE exploration_state_id = 1;"
+).fetchone()
+
+field_matches_species = 1
+capture_probability_matches_rarity = 1
+capture_roll_in_range = 1
+outcome_matches_roll = 1
+encounter_threshold_sequence_matches = 1
+
+for expected_index, encounter in enumerate(encounters, start=1):
+    (
+        _encounter_id,
+        encounter_sequence,
+        threshold_event_index,
+        species_id,
+        field_code,
+        rarity_tier,
+        capture_probability,
+        capture_roll,
+        outcome,
+    ) = encounter
+
+    species_row = cur.execute(
+        "SELECT field_code, rarity_tier FROM species WHERE species_id = ? LIMIT 1;",
+        (species_id,),
+    ).fetchone()
+    if species_row is None:
+        field_matches_species = 0
+    else:
+        species_field, species_rarity = species_row
+        if field_code != species_field or rarity_tier != species_rarity:
+            field_matches_species = 0
+
+    expected_probability = expected_probabilities.get(rarity_tier)
+    if expected_probability is None or not math.isclose(
+        capture_probability, expected_probability, rel_tol=0, abs_tol=1e-12
+    ):
+        capture_probability_matches_rarity = 0
+
+    if not (0.0 <= capture_roll < 1.0):
+        capture_roll_in_range = 0
+
+    expected_outcome = "captured" if capture_roll < capture_probability else "escaped"
+    if outcome != expected_outcome:
+        outcome_matches_roll = 0
+
+    if encounter_sequence != expected_index or threshold_event_index != expected_index:
+        encounter_threshold_sequence_matches = 0
+
+capture_resolved_payload_matches = 1
+if capture_resolved_event_count != encounter_count:
+    capture_resolved_payload_matches = 0
+else:
+    for aggregate_id, payload_json in capture_resolved_rows:
+        encounter = encounter_by_id.get(aggregate_id)
+        if encounter is None:
+            capture_resolved_payload_matches = 0
+            break
+
+        try:
+            payload = json.loads(payload_json)
+        except json.JSONDecodeError:
+            capture_resolved_payload_matches = 0
+            break
+
+        (
+            encounter_id,
+            _encounter_sequence,
+            _threshold_event_index,
+            species_id,
+            _field_code,
+            rarity_tier,
+            capture_probability,
+            capture_roll,
+            outcome,
+        ) = encounter
+
+        if (
+            payload.get("encounter_id") != encounter_id
+            or payload.get("species_id") != species_id
+            or payload.get("rarity") != rarity_tier
+            or not math.isclose(payload.get("capture_probability", -1), capture_probability, rel_tol=0, abs_tol=1e-12)
+            or not math.isclose(payload.get("rng_roll", -1), capture_roll, rel_tol=0, abs_tol=1e-12)
+            or payload.get("outcome") != outcome
+        ):
+            capture_resolved_payload_matches = 0
+            break
+
+print(f"encounter_count={encounter_count}")
+print(f"dex_seen_count={len(dex_seen_rows)}")
+print(f"dex_captured_count={len(dex_captured_rows)}")
+print(f"captured_count={captured_count}")
+print(f"threshold_event_count={threshold_event_count}")
+print(f"field_selected_count={field_selected_count}")
+print(f"rarity_selected_count={rarity_selected_count}")
+print(f"species_selected_count={species_selected_count}")
+print(f"encounter_spawned_count={encounter_spawned_count}")
+print(f"capture_resolved_event_count={capture_resolved_event_count}")
+print(f"seen_dex_updated_count={seen_dex_updated_count}")
+print(f"captured_dex_updated_count={captured_dex_updated_count}")
+print(f"domain_event_count={domain_event_count}")
+print(f"state_total_encounters={state_total_encounters}")
+print(f"state_total_captures={state_total_captures}")
+print(f"threshold_event_count_matches_expected={int(threshold_event_count == expected_threshold_count)}")
+print(f"field_selected_count_matches_expected={int(field_selected_count == expected_threshold_count)}")
+print(f"rarity_selected_count_matches_expected={int(rarity_selected_count == expected_threshold_count)}")
+print(f"species_selected_count_matches_expected={int(species_selected_count == expected_threshold_count)}")
+print(f"encounter_spawned_count_matches_expected={int(encounter_spawned_count == expected_threshold_count)}")
+print(f"capture_resolved_matches_encounter_count={int(capture_resolved_event_count == encounter_count)}")
+print(f"seen_dex_updated_matches_encounter_count={int(seen_dex_updated_count == encounter_count)}")
+print(f"captured_dex_updated_matches_captured_count={int(captured_dex_updated_count == captured_count)}")
+print(f"domain_event_count_matches_expected={int(domain_event_count == 2 + threshold_event_count + field_selected_count + rarity_selected_count + species_selected_count + encounter_spawned_count + capture_resolved_event_count + seen_dex_updated_count + captured_dex_updated_count)}")
+print(f"dex_seen_matches_unique_encounter_species={int(dex_seen_species == encounter_species)}")
+print(f"dex_captured_matches_unique_captured_species={int(dex_captured_species == captured_species)}")
+print(f"state_total_captures_matches_captured_count={int(state_total_captures == captured_count)}")
+print(f"dex_seen_links_valid={int(all(last_encounter_id in encounter_by_id for _, last_encounter_id in dex_seen_rows))}")
+print(f"dex_captured_links_valid={int(all(last_encounter_id in encounter_by_id for _, last_encounter_id in dex_captured_rows))}")
+print(f"field_matches_species={field_matches_species}")
+print(f"capture_probability_matches_rarity={capture_probability_matches_rarity}")
+print(f"capture_roll_in_range={capture_roll_in_range}")
+print(f"outcome_matches_roll={outcome_matches_roll}")
+print(f"capture_resolved_payload_matches={capture_resolved_payload_matches}")
+print(f"encounter_threshold_sequence_matches={encounter_threshold_sequence_matches}")
+PY
+}
+
+probe_backfill_lane() {
+  local database_path="$1"
+  local provider_code="$2"
+  python3 - "$database_path" "$provider_code" <<'PY'
+import sqlite3
+import sys
+
+db_path = sys.argv[1]
+provider_code = sys.argv[2]
+db = sqlite3.connect(db_path)
+cur = db.cursor()
+
+backfill_started_count = cur.execute(
+    "SELECT COUNT(*) FROM domain_events WHERE event_type = 'backfill_started';"
+).fetchone()[0]
+backfill_completed_count = cur.execute(
+    "SELECT COUNT(*) FROM domain_events WHERE event_type = 'backfill_completed';"
+).fetchone()[0]
+latest_backfill = cur.execute(
+    """
+    SELECT status,
+           samples_examined,
+           samples_created,
+           duplicates_skipped,
+           errors_count
+    FROM backfill_runs
+    WHERE provider_code = ?
+    ORDER BY backfill_run_id DESC
+    LIMIT 1;
+    """,
+    (provider_code,),
+).fetchone()
+health = cur.execute(
+    """
+    SELECT source_mode, health_state
+    FROM provider_health
+    WHERE provider_code = ?
+    ORDER BY provider_health_id DESC
+    LIMIT 1;
+    """,
+    (provider_code,),
+).fetchone()
+
+print(f"backfill_started_count={backfill_started_count}")
+print(f"backfill_completed_count={backfill_completed_count}")
+if latest_backfill is None:
+    print("latest_backfill_status=none")
+    print("latest_samples_examined=0")
+    print("latest_samples_created=0")
+    print("latest_duplicates_skipped=0")
+    print("latest_errors_count=0")
+else:
+    print(f"latest_backfill_status={latest_backfill[0]}")
+    print(f"latest_samples_examined={latest_backfill[1]}")
+    print(f"latest_samples_created={latest_backfill[2]}")
+    print(f"latest_duplicates_skipped={latest_backfill[3]}")
+    print(f"latest_errors_count={latest_backfill[4]}")
+
+if health is None:
+    print("latest_health_source_mode=none")
+    print("latest_health_state=none")
+else:
+    print(f"latest_health_source_mode={health[0]}")
+    print(f"latest_health_state={health[1]}")
+PY
+}
+
+set_gameplay_started_at() {
+  local database_path="$1"
+  local started_at="${2:-2026-04-01T00:00:00Z}"
+  sqlite3 "$database_path" <<SQL
+INSERT INTO settings (setting_key, setting_value_json, updated_at)
+VALUES ('gameplay_started_at', '"$started_at"', '$started_at')
+ON CONFLICT(setting_key) DO UPDATE SET
+  setting_value_json = excluded.setting_value_json,
+  updated_at = excluded.updated_at;
+SQL
+}
+
+set_live_gameplay_started_at() {
+  local database_path="$1"
+  local started_at="${2:-2026-04-01T00:00:00Z}"
+  sqlite3 "$database_path" <<SQL
+INSERT INTO settings (setting_key, setting_value_json, updated_at)
+VALUES ('live_gameplay_started_at', '"$started_at"', '$started_at')
+ON CONFLICT(setting_key) DO UPDATE SET
+  setting_value_json = excluded.setting_value_json,
+  updated_at = excluded.updated_at;
+SQL
+}
+
+printf 'VERIFY INFO: root=%s\n' "$ROOT"
+printf 'VERIFY INFO: worker=%s\n' "$worker_tag"
+printf 'VERIFY INFO: scratch=%s\n' "$scratch_path"
+printf 'VERIFY INFO: include_release_tooling=%s\n' "$include_release_tooling"
+printf 'VERIFY INFO: include_readme_screenshots=%s\n' "$include_readme_screenshots"
+
+build_started_at="$(timing_now)"
+set +e
+build_output="$(swift_cmd build 2>&1)"
+build_status=$?
+set -e
+if (( build_status != 0 )); then
+  printf '%s\n' "$build_output"
+  printf 'VERIFY FAIL: swift build exited with status %s\n' "$build_status" >&2
+  exit "$build_status"
+fi
+tokenmon_app_bin_dir="$(swift_cmd build --show-bin-path)"
+tokenmon_app_bin="$tokenmon_app_bin_dir/TokenmonApp"
+[[ -x "$tokenmon_app_bin" ]] || { printf 'VERIFY FAIL: missing built TokenmonApp at %s\n' "$tokenmon_app_bin" >&2; exit 1; }
+printf 'VERIFY PASS: swift build\n'
+printf '%s\n' "$build_output"
+record_timing "build" "swift_build" "$build_started_at"
+
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+
+workflow_assets_started_at="$(timing_now)"
+if [[ "$has_species_art_tooling" == "1" ]]; then
+  art_manifest_output="$("$ROOT/scripts/sync-species-art-manifest" 2>&1)"
+  require_contains "$art_manifest_output" "base_approved=151"
+  require_contains "$art_manifest_output" "not_started=0"
+  printf 'VERIFY PASS: species art manifest sync\n'
+
+  art_export_output="$("$ROOT/scripts/build-species-animation-assets" 2>&1)"
+  require_contains "$art_export_output" "manual_species_exports=151"
+  printf 'VERIFY PASS: species animation asset export\n'
+
+  art_export_probe="$(python3 - "$ROOT/assets/sprites/species" <<'PY'
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+species_dirs = [path for path in root.iterdir() if path.is_dir()]
+portrait = sum(1 for path in species_dirs if (path / "portrait_32.png").exists())
+portrait64 = sum(1 for path in species_dirs if (path / "portrait_64.png").exists())
+idle = sum(1 for path in species_dirs if (path / "companion_idle_16.png").exists())
+roam = sum(1 for path in species_dirs if (path / "companion_roam_16.png").exists())
+spawn = sum(1 for path in species_dirs if (path / "spawn_32.png").exists())
+spawn64 = sum(1 for path in species_dirs if (path / "spawn_64.png").exists())
+resolve_success = sum(1 for path in species_dirs if (path / "resolve_success_32.png").exists())
+resolve_success64 = sum(1 for path in species_dirs if (path / "resolve_success_64.png").exists())
+resolve_escape = sum(1 for path in species_dirs if (path / "resolve_escape_32.png").exists())
+resolve_escape64 = sum(1 for path in species_dirs if (path / "resolve_escape_64.png").exists())
+print(f"species_dirs={len(species_dirs)}")
+print(f"portrait_exports={portrait}")
+print(f"portrait_64_exports={portrait64}")
+print(f"obsolete_companion_exports={idle + roam}")
+print(f"spawn_exports={spawn}")
+print(f"spawn_64_exports={spawn64}")
+print(f"resolve_success_exports={resolve_success}")
+print(f"resolve_success_64_exports={resolve_success64}")
+print(f"resolve_escape_exports={resolve_escape}")
+print(f"resolve_escape_64_exports={resolve_escape64}")
+PY
+)"
+  require_contains "$art_export_probe" "species_dirs=151"
+  require_contains "$art_export_probe" "portrait_exports=151"
+  require_contains "$art_export_probe" "portrait_64_exports=151"
+  require_contains "$art_export_probe" "obsolete_companion_exports=0"
+  require_contains "$art_export_probe" "spawn_exports=151"
+  require_contains "$art_export_probe" "spawn_64_exports=151"
+  require_contains "$art_export_probe" "resolve_success_exports=151"
+  require_contains "$art_export_probe" "resolve_success_64_exports=151"
+  require_contains "$art_export_probe" "resolve_escape_exports=151"
+  require_contains "$art_export_probe" "resolve_escape_64_exports=151"
+  printf 'VERIFY PASS: species art export completeness\n'
+
+  contact_sheet_output="$("$ROOT/scripts/render-species-contact-sheets" 2>&1)"
+  require_contains "$contact_sheet_output" "all-species.svg"
+  require_contains "$contact_sheet_output" "phase-1-anchors.svg"
+  require_contains "$contact_sheet_output" "phase-2-commons.svg"
+  require_contains "$contact_sheet_output" "phase-3-uncommons.svg"
+  require_contains "$contact_sheet_output" "phase-4-rares.svg"
+  require_contains "$contact_sheet_output" "phase-5-epic_legendary.svg"
+  printf 'VERIFY PASS: species contact sheet generation\n'
+else
+  printf 'VERIFY INFO: skipping private species-art export checks because repo-private art tooling is absent\n'
+fi
+
+if [[ "$has_repo_workflow_tooling" == "1" ]]; then
+  repo_codex_audit_output="$("$ROOT/scripts/audit-codex-global-setup" --repo "$ROOT" --home "$tmpdir/empty-codex-home" 2>&1)"
+  expected_repo_skill_count="$(find "$ROOT/.agents/skills" -mindepth 2 -maxdepth 2 -name 'SKILL.md' 2>/dev/null | wc -l | tr -d ' ')"
+  expected_repo_alias_skill_count="$(find "$ROOT/.codex/skills" -mindepth 2 -maxdepth 2 -name 'SKILL.md' 2>/dev/null | wc -l | tr -d ' ')"
+  require_contains "$repo_codex_audit_output" "repo_codex_config_present=yes"
+  require_contains "$repo_codex_audit_output" "repo_codex_hooks_present=yes"
+  require_contains "$repo_codex_audit_output" "repo_rules_present=yes"
+  require_contains "$repo_codex_audit_output" "repo_hook_commands_safe=yes"
+  require_contains "$repo_codex_audit_output" "repo_canonical_skill_count=$expected_repo_skill_count"
+  require_contains "$repo_codex_audit_output" "repo_omx_alias_skill_count=$expected_repo_alias_skill_count"
+  require_contains "$repo_codex_audit_output" "repo_omx_alias_skill_stub_count=$expected_repo_alias_skill_count"
+  require_contains "$repo_codex_audit_output" "repo_omx_alias_skill_contract=yes"
+  require_contains "$repo_codex_audit_output" "repo_custom_agent_count=6"
+  require_contains "$repo_codex_audit_output" "repo_species_art_canonical_present=yes"
+  require_contains "$repo_codex_audit_output" "repo_species_art_alias_present=yes"
+  printf 'VERIFY PASS: repo codex workflow contract audit\n'
+
+  workflow_context_output="$("$ROOT/scripts/tokenmon-codex-workflow-status" --repo "$ROOT" --home "$tmpdir/empty-codex-home" 2>&1)"
+  require_contains "$workflow_context_output" "current_branch="
+  require_contains "$workflow_context_output" "repo_hook_commands_safe=yes"
+  require_contains "$workflow_context_output" "repo_omx_alias_skill_contract=yes"
+  require_contains "$workflow_context_output" "warning_count="
+  printf 'VERIFY PASS: repo workflow status summary helper\n'
+
+  stop_hook_dirty_status="$(cat <<'EOF'
+current_branch=codex/workflow-hook-hardening
+branch_is_main=no
+worktree_dirty=yes
+legacy_tokenmon_global_hook_install=not_detected
+EOF
+)"
+  stop_hook_dirty_output="$(TOKENMON_WORKFLOW_STATUS_OVERRIDE="$stop_hook_dirty_status" "$ROOT/.codex/hooks/stop_verify_reminder.sh" </dev/null 2>&1)"
+  if [[ -n "$stop_hook_dirty_output" ]]; then
+    printf 'VERIFY FAIL: stop hook should stay quiet during ordinary dirty task-branch iteration\n' >&2
+    exit 1
+  fi
+
+  stop_hook_clean_status="$(cat <<'EOF'
+current_branch=codex/workflow-hook-hardening
+branch_is_main=no
+worktree_dirty=no
+legacy_tokenmon_global_hook_install=not_detected
+EOF
+)"
+  stop_hook_clean_output="$(TOKENMON_WORKFLOW_STATUS_OVERRIDE="$stop_hook_clean_status" "$ROOT/.codex/hooks/stop_verify_reminder.sh" </dev/null 2>&1)"
+  require_contains "$stop_hook_clean_output" "./scripts/run-ai-verify"
+  require_contains "$stop_hook_clean_output" "codex/workflow-hook-hardening"
+  if [[ "$stop_hook_clean_output" == *"Worktree is dirty."* ]]; then
+    printf 'VERIFY FAIL: stop hook should not mention dirty worktrees when the status input is clean\n' >&2
+    exit 1
+  fi
+
+  stop_hook_main_status="$(cat <<'EOF'
+current_branch=main
+branch_is_main=yes
+worktree_dirty=yes
+legacy_tokenmon_global_hook_install=not_detected
+EOF
+)"
+  stop_hook_main_output="$(TOKENMON_WORKFLOW_STATUS_OVERRIDE="$stop_hook_main_status" "$ROOT/.codex/hooks/stop_verify_reminder.sh" </dev/null 2>&1)"
+  require_contains "$stop_hook_main_output" "still on main"
+  printf 'VERIFY PASS: repo stop hook reminder behavior\n'
+
+  if workflow_status_output="$("$ROOT/scripts/tokenmon-dev-workflow" status --repo-path "$ROOT" 2>&1)"; then
+    :
+  else
+    workflow_status_output=""
+  fi
+  if [[ "$workflow_status_output" == *"board_access=ok"* ]]; then
+    require_contains "$workflow_status_output" "project_title=tokenmon"
+    require_contains "$workflow_status_output" "default_branch=main"
+    require_contains "$workflow_status_output" "current_branch="
+    printf 'VERIFY PASS: repo workflow status helper\n'
+
+    workflow_probe_title="verify-workflow-missing-$$"
+    workflow_item_probe="$("$ROOT/scripts/tokenmon-dev-workflow" ensure-item --title "$workflow_probe_title" 2>&1)"
+    require_contains "$workflow_item_probe" "item_found=no"
+    require_contains "$workflow_item_probe" "item_created=no"
+    printf 'VERIFY PASS: workflow missing-item probe\n'
+  else
+    printf 'VERIFY INFO: skipping project-board workflow checks because GitHub Projects access is unavailable\n'
+  fi
+
+  workflow_git_dir="$tmpdir/workflow-git"
+  mkdir -p "$workflow_git_dir"
+  git -C "$workflow_git_dir" init -b main >/dev/null 2>&1
+  git -C "$workflow_git_dir" config user.name "Tokenmon Verify"
+  git -C "$workflow_git_dir" config user.email "verify@example.com"
+  printf 'root\n' >"$workflow_git_dir/README.md"
+  git -C "$workflow_git_dir" add README.md
+  git -C "$workflow_git_dir" commit -m "init" >/dev/null 2>&1
+  git -C "$workflow_git_dir" switch -c cleanup-me >/dev/null 2>&1
+  git -C "$workflow_git_dir" switch main >/dev/null 2>&1
+  cleanup_dry_run_output="$("$ROOT/scripts/tokenmon-dev-workflow" cleanup-merged --repo-path "$workflow_git_dir" 2>&1)"
+  require_contains "$cleanup_dry_run_output" "cleanup_mode=dry_run"
+  require_contains "$cleanup_dry_run_output" "merged_branch_candidate_count=1"
+  require_contains "$cleanup_dry_run_output" "merged_branch_candidates=cleanup-me"
+  cleanup_apply_output="$("$ROOT/scripts/tokenmon-dev-workflow" cleanup-merged --repo-path "$workflow_git_dir" --apply 2>&1)"
+  require_contains "$cleanup_apply_output" "cleanup_mode=apply"
+  require_contains "$cleanup_apply_output" "deleted_branch_count=1"
+  if git -C "$workflow_git_dir" show-ref --verify --quiet refs/heads/cleanup-me; then
+    printf 'VERIFY FAIL: cleanup-merged --apply should delete merged local branches\n' >&2
+    exit 1
+  fi
+  printf 'VERIFY PASS: workflow merged-branch cleanup helper\n'
+
+  legacy_cleanup_home="$tmpdir/legacy-cleanup-home"
+  mkdir -p "$legacy_cleanup_home/.codex"
+  cat >"$legacy_cleanup_home/.codex/hooks.json" <<'JSON'
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Applications/Tokenmon.app/Contents/MacOS/TokenmonApp --tokenmon-provider-codex-hook-import --db /tmp/tokenmon.sqlite"
+          },
+          {
+            "type": "command",
+            "command": "echo keep-me"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "tokenmon provider codex hook import --db /tmp/tokenmon.sqlite"
+          }
+        ]
+      }
+    ]
+  }
+}
+JSON
+  legacy_cleanup_dry_run="$("$ROOT/scripts/repair-codex-global-setup" --home "$legacy_cleanup_home" 2>&1)"
+  require_contains "$legacy_cleanup_dry_run" "mode=dry_run"
+  require_contains "$legacy_cleanup_dry_run" "removed_tokenmon_hook_count=2"
+  require_contains "$legacy_cleanup_dry_run" "result=would_update"
+  legacy_cleanup_apply="$("$ROOT/scripts/repair-codex-global-setup" --home "$legacy_cleanup_home" --apply 2>&1)"
+  require_contains "$legacy_cleanup_apply" "mode=apply"
+  require_contains "$legacy_cleanup_apply" "removed_tokenmon_hook_count=2"
+  require_contains "$legacy_cleanup_apply" "result=updated"
+  require_contains "$(cat "$legacy_cleanup_home/.codex/hooks.json")" "echo keep-me"
+  if grep -Fq -- "--tokenmon-provider-codex-hook-import" "$legacy_cleanup_home/.codex/hooks.json"; then
+    printf 'VERIFY FAIL: repair-codex-global-setup should remove Tokenmon legacy hook commands\n' >&2
+    exit 1
+  fi
+  printf 'VERIFY PASS: legacy codex hook cleanup helper\n'
+else
+  printf 'VERIFY INFO: skipping repo-private workflow helper checks because repo workflow assets are absent\n'
+fi
+
+dot_asset_path="$tmpdir/generated-dots.svg"
+dot_asset_output="$("$ROOT/scripts/generate-dot-asset" --size 16 --count 3 --gap 4 --color "#4B9B6B" --output "$dot_asset_path" 2>&1)"
+require_contains "$dot_asset_output" "dot_asset_output=$dot_asset_path"
+require_contains "$dot_asset_output" "count=3"
+require_contains "$dot_asset_output" "color=#4B9B6B"
+require_contains "$(cat "$dot_asset_path")" "<svg"
+require_contains "$(cat "$dot_asset_path")" "<circle"
+require_contains "$(cat assets/placeholders/activity-dots.svg)" "<circle"
+printf 'VERIFY PASS: dot asset utility and placeholder asset\n'
+
+if [[ -d "$ROOT/art/source/effects" ]]; then
+  for effect in alert capture_snap escape_dash; do
+    [[ -f "$ROOT/art/source/effects/$effect/${effect}_master_32.png" ]] || {
+      printf 'VERIFY FAIL: missing effect master for %s\n' "$effect" >&2
+      exit 1
+    }
+  done
+else
+  printf 'VERIFY INFO: skipping effect-master source checks because art/source/effects is absent\n'
+fi
+for effect_asset in alert_16.png capture_snap_16.png escape_dash_16.png alert_8.png capture_snap_8.png escape_dash_8.png; do
+  [[ -f "$ROOT/assets/sprites/effects/$effect_asset" ]] || {
+    printf 'VERIFY FAIL: missing effect export %s\n' "$effect_asset" >&2
+    exit 1
+  }
+done
+printf 'VERIFY PASS: menubar effect masters and exports present\n'
+
+if [[ "$has_public_export_tooling" == "1" ]]; then
+  public_export_started_at="$(timing_now)"
+  public_export_dir="$tmpdir/public-repo"
+  public_export_output="$("$ROOT/scripts/export-public-repo" --output "$public_export_dir" --audit 2>&1)"
+  require_contains "$public_export_output" "public_export_output=$public_export_dir"
+  require_contains "$public_export_output" "audit_result=pass"
+  [[ -f "$public_export_dir/README.md" ]] || { printf 'VERIFY FAIL: public export should contain README.md\n' >&2; exit 1; }
+  [[ -f "$public_export_dir/docs/architecture/public-source-overview.md" ]] || { printf 'VERIFY FAIL: public export should contain public source overview doc\n' >&2; exit 1; }
+  [[ ! -e "$public_export_dir/.codex" ]] || { printf 'VERIFY FAIL: public export must not contain .codex\n' >&2; exit 1; }
+  printf 'VERIFY PASS: sanitized public repo export and audit\n'
+  record_timing "public_export" "sanitized_public_repo_export" "$public_export_started_at"
+else
+  printf 'VERIFY INFO: skipping public export audit because export tooling is absent\n'
+fi
+
+if have_repo_paths "scripts/sync-public-repo" && [[ "$has_public_export_tooling" == "1" ]]; then
+  public_sync_dry_repo="$tmpdir/public-sync-dry"
+  mkdir -p "$public_sync_dry_repo"
+  git -C "$public_sync_dry_repo" init -b main >/dev/null 2>&1
+  git -C "$public_sync_dry_repo" config user.name "Tokenmon Verify"
+  git -C "$public_sync_dry_repo" config user.email "verify@example.com"
+  printf 'old\n' >"$public_sync_dry_repo/OLD.txt"
+  git -C "$public_sync_dry_repo" add OLD.txt
+  git -C "$public_sync_dry_repo" commit -m "init" >/dev/null 2>&1
+
+  public_sync_dry_output="$("$ROOT/scripts/sync-public-repo" --public-dir "$public_sync_dry_repo" 2>&1)"
+  require_contains "$public_sync_dry_output" "public_sync_changed=yes"
+  require_contains "$public_sync_dry_output" "public_sync_target=$public_sync_dry_repo"
+  require_contains "$public_sync_dry_output" "public_sync_committed=no"
+  require_contains "$public_sync_dry_output" "public_sync_pushed=no"
+  [[ -f "$public_sync_dry_repo/README.md" ]] || { printf 'VERIFY FAIL: public sync should copy README.md into the target repo\n' >&2; exit 1; }
+  [[ -f "$public_sync_dry_repo/.gitignore" ]] || { printf 'VERIFY FAIL: public sync should copy .gitignore into the target repo\n' >&2; exit 1; }
+  [[ ! -e "$public_sync_dry_repo/OLD.txt" ]] || { printf 'VERIFY FAIL: public sync should remove files missing from the sanitized export\n' >&2; exit 1; }
+
+  public_sync_commit_repo="$tmpdir/public-sync-commit"
+  mkdir -p "$public_sync_commit_repo"
+  git -C "$public_sync_commit_repo" init -b main >/dev/null 2>&1
+  git -C "$public_sync_commit_repo" config user.name "Tokenmon Verify"
+  git -C "$public_sync_commit_repo" config user.email "verify@example.com"
+  printf 'old\n' >"$public_sync_commit_repo/OLD.txt"
+  git -C "$public_sync_commit_repo" add OLD.txt
+  git -C "$public_sync_commit_repo" commit -m "init" >/dev/null 2>&1
+
+  public_sync_commit_output="$("$ROOT/scripts/sync-public-repo" --public-dir "$public_sync_commit_repo" --commit --commit-message "Sync public mirror" 2>&1)"
+  require_contains "$public_sync_commit_output" "public_sync_changed=yes"
+  require_contains "$public_sync_commit_output" "public_sync_committed=yes"
+  require_contains "$public_sync_commit_output" "public_sync_pushed=no"
+
+  public_sync_repeat_output="$("$ROOT/scripts/sync-public-repo" --public-dir "$public_sync_commit_repo" 2>&1)"
+  require_contains "$public_sync_repeat_output" "public_sync_changed=no"
+  require_contains "$public_sync_repeat_output" "public_sync_committed=no"
+  require_contains "$public_sync_repeat_output" "public_sync_pushed=no"
+  printf 'VERIFY PASS: sanitized public repo sync helper\n'
+fi
+
+record_timing "workflow_assets" "repo_assets_and_workflow_helpers" "$workflow_assets_started_at"
+db="$tmpdir/tokenmon.sqlite"
+
+smoke_started_at="$(timing_now)"
+init_output="$(tokenmon_app_cmd --tokenmon-db-init --db "$db" 2>&1)"
+require_contains "$init_output" "initialized database"
+set_gameplay_started_at "$db"
+set_live_gameplay_started_at "$db"
+printf 'VERIFY PASS: db init\n'
+
+app_smoke_output="$(tokenmon_app_cmd --smoke-test --db "$db" 2>&1)"
+require_contains "$app_smoke_output" "smoke_test: ok"
+require_contains "$app_smoke_output" "animation_placeholder: field_effect_scene"
+require_contains "$app_smoke_output" "scene_state: idle"
+require_contains "$app_smoke_output" "field_state: calm"
+require_contains "$app_smoke_output" "overlay_state: none"
+require_contains "$app_smoke_output" "wild_state: hidden"
+require_contains "$app_smoke_output" "seen_species: 0"
+require_contains "$app_smoke_output" "captured_species: 0"
+require_contains "$app_smoke_output" "notifications_enabled: true"
+require_contains "$app_smoke_output" "provider_status_visibility: true"
+require_contains "$app_smoke_output" "provider_status_entries_visible: 3"
+require_contains "$app_smoke_output" "launch_at_login_supported: false"
+require_contains "$app_smoke_output" "latest_encounter: none"
+printf 'VERIFY PASS: menubar app empty-db smoke\n'
+
+seed_output="$(tokenmon_app_cmd --tokenmon-seed-species --db "$db" 2>&1)"
+require_contains "$seed_output" "seeded species: total=151 inserted=0"
+printf 'VERIFY PASS: species seed idempotency after bootstrap seed\n'
+
+seed_rerun_output="$(tokenmon_app_cmd --tokenmon-seed-species --db "$db" 2>&1)"
+require_contains "$seed_rerun_output" "seeded species: total=151 inserted=0"
+printf 'VERIFY PASS: species seed rerun idempotency\n'
+
+summary_output="$(tokenmon_app_cmd --tokenmon-summary --db "$db" 2>&1)"
+require_contains "$summary_output" "providers: 3"
+require_contains "$summary_output" "species: 151"
+printf 'VERIFY PASS: summary after bootstrap/seed\n'
+
+menubar_screenshot_dir="$tmpdir/menubar-screens"
+menubar_screenshot_output="$(tokenmon_app_cmd --render-menubar-strip-screenshots --db "$db" --out-dir "$menubar_screenshot_dir" 2>&1)"
+require_contains "$menubar_screenshot_output" "menubar_strip_screenshots: ok"
+require_contains "$menubar_screenshot_output" "effect_matrix: $menubar_screenshot_dir/menubar-effect-matrix.png"
+[[ -f "$menubar_screenshot_dir/menubar-field-matrix.png" ]] || { printf 'VERIFY FAIL: missing menubar field matrix screenshot\n' >&2; exit 1; }
+[[ -f "$menubar_screenshot_dir/menubar-effect-matrix.png" ]] || { printf 'VERIFY FAIL: missing menubar effect matrix screenshot\n' >&2; exit 1; }
+printf 'VERIFY PASS: menubar strip screenshot generation\n'
+
+diagnose_empty_output="$(tokenmon_app_cmd --tokenmon-diagnose --db "$db" 2>&1)"
+require_contains "$diagnose_empty_output" "[claude]"
+require_contains "$diagnose_empty_output" "health_state: missing_configuration"
+require_contains "$diagnose_empty_output" "next_step: Tokenmon should configure Claude automatically; repair Claude if the status line is still unavailable"
+require_contains "$diagnose_empty_output" "offline_dashboard_recovery: known_transcript_only"
+require_contains "$diagnose_empty_output" "live_gameplay_armed: no"
+require_contains "$diagnose_empty_output" "[codex]"
+require_contains "$diagnose_empty_output" "source_mode: codex_session_store_live"
+require_any_contains \
+  "$diagnose_empty_output" \
+  "health_state: connected" \
+  "health_state: active" \
+  "health_state: missing_configuration"
+require_any_contains \
+  "$diagnose_empty_output" \
+  "next_step: monitor recent provider activity" \
+  "next_step: Codex is watched automatically; inspect the local session store path if live updates are missing"
+require_contains "$diagnose_empty_output" "offline_dashboard_recovery: automatic_supported"
+require_contains "$diagnose_empty_output" "live_gameplay_armed: yes"
+require_contains "$diagnose_empty_output" "[gemini]"
+require_contains "$diagnose_empty_output" "next_step: Tokenmon should configure Gemini automatically; repair Gemini if telemetry is still unavailable"
+require_contains "$diagnose_empty_output" "offline_dashboard_recovery: unavailable"
+require_contains "$diagnose_empty_output" "live_gameplay_armed: no"
+require_contains "$diagnose_empty_output" "idle footprint"
+require_contains "$diagnose_empty_output" "menubar_refresh_mode: on-launch, inbox file-watch debounce, and manual refresh"
+require_contains "$diagnose_empty_output" "assessment: lightweight by default"
+printf 'VERIFY PASS: diagnose empty-state provider guidance\n'
+
+settings_smoke_output="$(tokenmon_app_cmd --smoke-test --db "$db" --smoke-notifications-enabled false --smoke-provider-status-visibility false 2>&1)"
+require_contains "$settings_smoke_output" "notifications_enabled: false"
+require_contains "$settings_smoke_output" "provider_status_visibility: false"
+require_contains "$settings_smoke_output" "provider_status_entries_visible: 0"
+printf 'VERIFY PASS: app settings persistence smoke\n'
+record_timing "smoke" "bootstrap_and_menu_smoke" "$smoke_started_at"
+
+provider_fixtures_started_at="$(timing_now)"
+onboarding_home="$tmpdir/onboarding-home"
+mkdir -p "$onboarding_home"
+claude_onboarding_db="$tmpdir/claude-onboarding.sqlite"
+tokenmon_app_cmd --tokenmon-db-init --db "$claude_onboarding_db" >/dev/null 2>&1
+set_gameplay_started_at "$claude_onboarding_db"
+claude_onboarding_output="$(TOKENMON_HOME_OVERRIDE="$onboarding_home" tokenmon_app_cmd --tokenmon-provider-connect claude --db "$claude_onboarding_db" 2>&1)"
+require_contains "$claude_onboarding_output" "provider_connect: ok"
+require_contains "$claude_onboarding_output" "provider: claude"
+claude_settings_path="$onboarding_home/.claude/settings.json"
+require_contains "$(cat "$claude_settings_path")" "--tokenmon-provider-claude-statusline-import"
+printf 'VERIFY PASS: claude onboarding installer\n'
+
+codex_onboarding_db="$tmpdir/codex-onboarding.sqlite"
+mkdir -p "$onboarding_home/.codex"
+printf '%s\n' '[features]' 'multi_agent = true' > "$onboarding_home/.codex/config.toml"
+tokenmon_app_cmd --tokenmon-db-init --db "$codex_onboarding_db" >/dev/null 2>&1
+set_gameplay_started_at "$codex_onboarding_db"
+codex_onboarding_output="$(TOKENMON_HOME_OVERRIDE="$onboarding_home" tokenmon_app_cmd --tokenmon-provider-connect codex --db "$codex_onboarding_db" 2>&1)"
+require_contains "$codex_onboarding_output" "provider_connect: ok"
+require_contains "$codex_onboarding_output" "provider: codex"
+require_contains "$codex_onboarding_output" "automatic"
+require_contains "$(cat "$onboarding_home/.codex/config.toml")" "multi_agent = true"
+if [[ -f "$onboarding_home/.codex/hooks.json" ]]; then
+  printf 'VERIFY FAIL: codex onboarding should not install hooks.json for automatic observation\n' >&2
+  exit 1
+fi
+printf 'VERIFY PASS: codex onboarding stays hookless\n'
+
+legacy_audit_home="$tmpdir/legacy-audit-home"
+mkdir -p "$legacy_audit_home/.codex"
+printf '%s\n' '[features]' 'codex_hooks = true' > "$legacy_audit_home/.codex/config.toml"
+cat >"$legacy_audit_home/.codex/hooks.json" <<'JSON'
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "tokenmon --tokenmon-provider-codex-hook-import --db /tmp/tokenmon.sqlite"
+          }
+        ]
+      }
+    ]
+  }
+}
+JSON
+if [[ "$has_repo_workflow_tooling" == "1" ]]; then
+  legacy_global_audit_output="$("$ROOT/scripts/audit-codex-global-setup" --repo "$ROOT" --home "$legacy_audit_home" 2>&1)"
+  require_contains "$legacy_global_audit_output" "global_codex_hooks_feature=enabled"
+  require_contains "$legacy_global_audit_output" "legacy_tokenmon_global_hook_install=detected"
+  printf 'VERIFY PASS: legacy codex global audit detection\n'
+else
+  printf 'VERIFY INFO: skipping legacy codex global audit helper check because repo workflow tooling is absent\n'
+fi
+
+codex_single_out="$tmpdir/codex-single.ndjson"
+codex_single_output="$(tokenmon_app_cmd --tokenmon-provider-codex-exec-json-import Fixtures/CodexExecJSON/single-turn.jsonl --out "$codex_single_out" 2>&1)"
+require_contains "$codex_single_output" "codex exec json import complete"
+require_contains "$codex_single_output" "thread_id: thread_exec_single"
+require_contains "$codex_single_output" "events_written: 1"
+require_contains "$codex_single_output" "duplicate_turns_skipped: 0"
+codex_single_event="$(cat "$codex_single_out")"
+require_contains "$codex_single_event" "\"provider_session_id\":\"thread_exec_single\""
+require_contains "$codex_single_event" "\"normalized_total_tokens\":2000"
+require_contains "$codex_single_event" "\"provider_event_fingerprint\":\"codex:thread_exec_single:turn_001\""
+printf 'VERIFY PASS: codex exec json single-turn import\n'
+
+codex_duplicate_out="$tmpdir/codex-duplicate.ndjson"
+codex_duplicate_output="$(tokenmon_app_cmd --tokenmon-provider-codex-exec-json-import Fixtures/CodexExecJSON/duplicate-turn.jsonl --out "$codex_duplicate_out" 2>&1)"
+require_contains "$codex_duplicate_output" "thread_id: thread_exec_duplicate"
+require_contains "$codex_duplicate_output" "events_written: 1"
+require_contains "$codex_duplicate_output" "duplicate_turns_skipped: 1"
+codex_duplicate_event="$(cat "$codex_duplicate_out")"
+require_contains "$codex_duplicate_event" "\"provider_event_fingerprint\":\"codex:thread_exec_duplicate:turn_001\""
+printf 'VERIFY PASS: codex exec json duplicate turn handling\n'
+
+codex_two_turns_out="$tmpdir/codex-two-turns.ndjson"
+codex_two_turns_output="$(tokenmon_app_cmd --tokenmon-provider-codex-exec-json-import Fixtures/CodexExecJSON/two-turns.jsonl --out "$codex_two_turns_out" 2>&1)"
+require_contains "$codex_two_turns_output" "thread_id: thread_exec_two_turns"
+require_contains "$codex_two_turns_output" "events_written: 2"
+require_contains "$codex_two_turns_output" "duplicate_turns_skipped: 0"
+codex_two_turns_events="$(cat "$codex_two_turns_out")"
+require_contains "$codex_two_turns_events" "\"normalized_total_tokens\":2000"
+require_contains "$codex_two_turns_events" "\"normalized_total_tokens\":3600"
+printf 'VERIFY PASS: codex exec json cumulative turn mapping\n'
+
+codex_managed_db="$tmpdir/codex-managed.sqlite"
+tokenmon_app_cmd --tokenmon-db-init --db "$codex_managed_db" >/dev/null 2>&1
+set_gameplay_started_at "$codex_managed_db"
+set_live_gameplay_started_at "$codex_managed_db"
+tokenmon_app_cmd --tokenmon-seed-species --db "$codex_managed_db" >/dev/null 2>&1
+codex_managed_ingest_output="$(tokenmon_app_cmd --tokenmon-ingest-inbox "$codex_two_turns_out" --db "$codex_managed_db" 2>&1)"
+require_contains "$codex_managed_ingest_output" "accepted: 2"
+codex_managed_summary="$(tokenmon_app_cmd --tokenmon-summary --db "$codex_managed_db" 2>&1)"
+require_contains "$codex_managed_summary" "usage_samples: 2"
+require_contains "$codex_managed_summary" "total_normalized_tokens: 3600"
+require_contains "$codex_managed_summary" "tokens_since_last_encounter: 3600"
+require_contains "$codex_managed_summary" "total_encounters: 0"
+printf 'VERIFY PASS: codex exec json drives gameplay path\n'
+
+codex_diagnose_output="$(tokenmon_app_cmd --tokenmon-diagnose --db "$codex_managed_db" 2>&1)"
+require_contains "$codex_diagnose_output" "[codex]"
+require_contains "$codex_diagnose_output" "source_mode: codex_exec_json"
+require_contains "$codex_diagnose_output" "health_state: active"
+printf 'VERIFY PASS: diagnose codex structured ingest\n'
+
+codex_stream_bin="$tmpdir/fake-codex-stream.sh"
+cat >"$codex_stream_bin" <<'SH'
+#!/bin/sh
+printf '%s\n' '{"type":"thread.started","thread_id":"thread_stream_verify","cwd":"/tmp/tokenmon-stream","model":"gpt-5.4"}'
+sleep 0.2
+printf '%s\n' '{"type":"turn.completed","thread_id":"thread_stream_verify","turn_id":"turn_001","timestamp":"2026-04-06T00:00:00Z","cwd":"/tmp/tokenmon-stream","model":"gpt-5.4","usage":{"input_tokens":1000,"cached_input_tokens":100,"output_tokens":400}}'
+sleep 0.4
+printf '%s\n' '{"type":"turn.completed","thread_id":"thread_stream_verify","turn_id":"turn_002","timestamp":"2026-04-06T00:00:03Z","cwd":"/tmp/tokenmon-stream","model":"gpt-5.4","usage":{"input_tokens":1200,"cached_input_tokens":0,"output_tokens":500}}'
+SH
+chmod +x "$codex_stream_bin"
+codex_stream_out="$tmpdir/codex-stream.ndjson"
+(
+  tokenmon_app_cmd --tokenmon-provider-codex-exec-json-run "stream verify" --codex-bin "$codex_stream_bin" --out "$codex_stream_out" \
+    >"$tmpdir/codex-stream.log" 2>"$tmpdir/codex-stream.err"
+) &
+codex_stream_pid=$!
+stream_partial_ok=0
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  if [[ -f "$codex_stream_out" ]]; then
+    codex_stream_partial="$(cat "$codex_stream_out")"
+    if [[ "$codex_stream_partial" == *"codex:thread_stream_verify:turn_001"* && "$codex_stream_partial" != *"turn_002"* ]]; then
+      stream_partial_ok=1
+      break
+    fi
+  fi
+  sleep 0.2
+done
+if [[ "$stream_partial_ok" -ne 1 ]]; then
+  printf 'VERIFY FAIL: codex exec json run did not expose the first delayed turn before process exit\n' >&2
+  exit 1
+fi
+wait "$codex_stream_pid"
+codex_stream_final="$(cat "$codex_stream_out")"
+require_contains "$codex_stream_final" "\"provider_event_fingerprint\":\"codex:thread_stream_verify:turn_002\""
+require_contains "$(cat "$tmpdir/codex-stream.log")" "events_written: 2"
+printf 'VERIFY PASS: codex exec json run streams live output\n'
+
+codex_reuse_db="$tmpdir/codex-reuse.sqlite"
+codex_reuse_inbox="$tmpdir/codex-reuse.ndjson"
+codex_reuse_source_key="codex-reuse"
+tokenmon_app_cmd --tokenmon-db-init --db "$codex_reuse_db" >/dev/null 2>&1
+set_gameplay_started_at "$codex_reuse_db" "2000-01-01T00:00:00Z"
+first_reuse_observed_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+cat >"$codex_reuse_inbox" <<EOF
+{"event_type":"provider_usage_sample","provider":"codex","source_mode":"codex_exec_json","provider_session_id":"reuse-a","observed_at":"$first_reuse_observed_at","workspace_dir":"/tmp/tokenmon-reuse","model_slug":"gpt-5.4","transcript_path":null,"total_input_tokens":120,"total_output_tokens":80,"total_cached_input_tokens":0,"normalized_total_tokens":200,"provider_event_fingerprint":"codex:reuse-a:turn_001","raw_reference":{"kind":"jsonl","offset":"1","event_name":"turn.completed"}}
+EOF
+codex_reuse_first_output="$(tokenmon_app_cmd --tokenmon-ingest-inbox "$codex_reuse_inbox" --db "$codex_reuse_db" --source-key "$codex_reuse_source_key" 2>&1)"
+require_contains "$codex_reuse_first_output" "accepted: 1"
+sleep 1
+second_reuse_observed_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+cat >"$codex_reuse_inbox" <<EOF
+{"event_type":"provider_usage_sample","provider":"codex","source_mode":"codex_exec_json","provider_session_id":"reuse-b","observed_at":"$second_reuse_observed_at","workspace_dir":"/tmp/tokenmon-reuse","model_slug":"gpt-5.4","transcript_path":null,"total_input_tokens":220,"total_output_tokens":180,"total_cached_input_tokens":0,"normalized_total_tokens":400,"provider_event_fingerprint":"codex:reuse-b:turn_001","raw_reference":{"kind":"jsonl","offset":"1","event_name":"turn.completed"}}
+EOF
+codex_reuse_second_output="$(tokenmon_app_cmd --tokenmon-ingest-inbox "$codex_reuse_inbox" --db "$codex_reuse_db" --source-key "$codex_reuse_source_key" 2>&1)"
+require_contains "$codex_reuse_second_output" "accepted: 1"
+codex_reuse_summary="$(tokenmon_app_cmd --tokenmon-summary --db "$codex_reuse_db" 2>&1)"
+require_contains "$codex_reuse_summary" "usage_samples: 2"
+printf 'VERIFY PASS: replaced codex inbox file resets checkpoint safely\n'
+
+claude_statusline_out="$tmpdir/claude-statusline.ndjson"
+claude_initial_output="$(cat Fixtures/ClaudeStatusLine/initial.json | tokenmon_app_cmd --tokenmon-provider-claude-statusline-import --out "$claude_statusline_out" --verbose 2>&1)"
+require_contains "$claude_initial_output" "[Opus]"
+require_contains "$claude_initial_output" "claude statusline import complete"
+require_contains "$claude_initial_output" "session_id: claude_statusline_fixture"
+require_contains "$claude_initial_output" "transcript_path: /tmp/claude-statusline-fixture.jsonl"
+require_contains "$claude_initial_output" "normalized_total_tokens: 1800"
+claude_first_event="$(cat "$claude_statusline_out")"
+require_contains "$claude_first_event" "\"provider\":\"claude\""
+require_contains "$claude_first_event" "\"source_mode\":\"claude_statusline_live\""
+require_contains "$claude_first_event" "\"provider_event_fingerprint\":\"claude:claude_statusline_fixture:1200:600\""
+printf 'VERIFY PASS: claude statusline initial import\n'
+
+claude_followup_output="$(cat Fixtures/ClaudeStatusLine/followup.json | tokenmon_app_cmd --tokenmon-provider-claude-statusline-import --out "$claude_statusline_out" --verbose 2>&1)"
+require_contains "$claude_followup_output" "normalized_total_tokens: 3600"
+claude_statusline_events="$(cat "$claude_statusline_out")"
+require_contains "$claude_statusline_events" "\"provider_event_fingerprint\":\"claude:claude_statusline_fixture:2400:1200\""
+printf 'VERIFY PASS: claude statusline followup import\n'
+
+claude_statusline_db="$tmpdir/claude-statusline.sqlite"
+tokenmon_app_cmd --tokenmon-db-init --db "$claude_statusline_db" >/dev/null 2>&1
+set_gameplay_started_at "$claude_statusline_db"
+set_live_gameplay_started_at "$claude_statusline_db"
+tokenmon_app_cmd --tokenmon-seed-species --db "$claude_statusline_db" >/dev/null 2>&1
+claude_statusline_ingest_output="$(tokenmon_app_cmd --tokenmon-ingest-inbox "$claude_statusline_out" --db "$claude_statusline_db" 2>&1)"
+require_contains "$claude_statusline_ingest_output" "accepted: 2"
+claude_statusline_summary="$(tokenmon_app_cmd --tokenmon-summary --db "$claude_statusline_db" 2>&1)"
+require_contains "$claude_statusline_summary" "usage_samples: 2"
+require_contains "$claude_statusline_summary" "total_normalized_tokens: 1800"
+require_contains "$claude_statusline_summary" "tokens_since_last_encounter: 1800"
+require_contains "$claude_statusline_summary" "total_encounters: 0"
+printf 'VERIFY PASS: claude statusline drives gameplay path\n'
+
+claude_hook_db="$tmpdir/claude-hook.sqlite"
+tokenmon_app_cmd --tokenmon-db-init --db "$claude_hook_db" >/dev/null 2>&1
+set_gameplay_started_at "$claude_hook_db"
+tokenmon_app_cmd --tokenmon-seed-species --db "$claude_hook_db" >/dev/null 2>&1
+claude_hook_start_output="$(tokenmon_app_cmd --tokenmon-provider-claude-hook-import --db "$claude_hook_db" --input Fixtures/ClaudeHooks/session-start.json --verbose 2>&1)"
+require_contains "$claude_hook_start_output" "hook_event_name: SessionStart"
+require_contains "$claude_hook_start_output" "health_state: active"
+claude_hook_notification_output="$(tokenmon_app_cmd --tokenmon-provider-claude-hook-import --db "$claude_hook_db" --input Fixtures/ClaudeHooks/notification.json --verbose 2>&1)"
+require_contains "$claude_hook_notification_output" "hook_event_name: Notification"
+require_contains "$claude_hook_notification_output" "message: Claude needs your permission to use Bash"
+claude_hook_end_output="$(tokenmon_app_cmd --tokenmon-provider-claude-hook-import --db "$claude_hook_db" --input Fixtures/ClaudeHooks/session-end.json --verbose 2>&1)"
+require_contains "$claude_hook_end_output" "hook_event_name: SessionEnd"
+require_contains "$claude_hook_end_output" "session_state: ended"
+claude_hook_diagnose_output="$(tokenmon_app_cmd --tokenmon-diagnose --db "$claude_hook_db" 2>&1)"
+require_contains "$claude_hook_diagnose_output" "source_mode: claude_hooks_enrichment"
+require_contains "$claude_hook_diagnose_output" "message: Claude session ended via SessionEnd"
+printf 'VERIFY PASS: claude hooks enrichment metadata path\n'
+
+claude_backfill_db="$tmpdir/claude-backfill.sqlite"
+tokenmon_app_cmd --tokenmon-db-init --db "$claude_backfill_db" >/dev/null 2>&1
+set_gameplay_started_at "$claude_backfill_db"
+tokenmon_app_cmd --tokenmon-seed-species --db "$claude_backfill_db" >/dev/null 2>&1
+claude_backfill_output="$(tokenmon_app_cmd --tokenmon-backfill claude --db "$claude_backfill_db" --transcript Fixtures/ClaudeTranscript/usage-bearing.jsonl 2>&1)"
+require_contains "$claude_backfill_output" "backfill run complete"
+require_contains "$claude_backfill_output" "provider: claude"
+require_contains "$claude_backfill_output" "status: completed"
+require_contains "$claude_backfill_output" "session_id: claude_backfill_fixture"
+require_contains "$claude_backfill_output" "samples_examined: 2"
+require_contains "$claude_backfill_output" "samples_created: 2"
+require_contains "$claude_backfill_output" "duplicates_skipped: 0"
+claude_backfill_summary="$(tokenmon_app_cmd --tokenmon-summary --db "$claude_backfill_db" 2>&1)"
+require_contains "$claude_backfill_summary" "usage_samples: 2"
+require_contains "$claude_backfill_summary" "total_normalized_tokens: 0"
+require_contains "$claude_backfill_summary" "tokens_since_last_encounter: 0"
+require_contains "$claude_backfill_summary" "total_encounters: 0"
+claude_backfill_probe="$(probe_backfill_lane "$claude_backfill_db" claude)"
+require_contains "$claude_backfill_probe" "backfill_started_count=1"
+require_contains "$claude_backfill_probe" "backfill_completed_count=1"
+require_contains "$claude_backfill_probe" "latest_backfill_status=completed"
+require_contains "$claude_backfill_probe" "latest_samples_examined=2"
+require_contains "$claude_backfill_probe" "latest_samples_created=2"
+require_contains "$claude_backfill_probe" "latest_duplicates_skipped=0"
+require_contains "$claude_backfill_probe" "latest_health_source_mode=claude_transcript_backfill"
+require_contains "$claude_backfill_probe" "latest_health_state=connected"
+claude_backfill_replay_output="$(tokenmon_app_cmd --tokenmon-backfill claude --db "$claude_backfill_db" --transcript Fixtures/ClaudeTranscript/usage-bearing.jsonl 2>&1)"
+require_contains "$claude_backfill_replay_output" "samples_created: 0"
+require_contains "$claude_backfill_replay_output" "duplicates_skipped: 2"
+claude_backfill_replay_probe="$(probe_backfill_lane "$claude_backfill_db" claude)"
+require_contains "$claude_backfill_replay_probe" "backfill_started_count=2"
+require_contains "$claude_backfill_replay_probe" "backfill_completed_count=2"
+require_contains "$claude_backfill_replay_probe" "latest_backfill_status=completed"
+require_contains "$claude_backfill_replay_probe" "latest_samples_created=0"
+require_contains "$claude_backfill_replay_probe" "latest_duplicates_skipped=2"
+printf 'VERIFY PASS: claude transcript backfill and replay safety\n'
+
+claude_backfill_fail_db="$tmpdir/claude-backfill-fail.sqlite"
+tokenmon_app_cmd --tokenmon-db-init --db "$claude_backfill_fail_db" >/dev/null 2>&1
+set_gameplay_started_at "$claude_backfill_fail_db"
+tokenmon_app_cmd --tokenmon-seed-species --db "$claude_backfill_fail_db" >/dev/null 2>&1
+set +e
+claude_backfill_fail_output="$(tokenmon_app_cmd --tokenmon-backfill claude --db "$claude_backfill_fail_db" --transcript Fixtures/ClaudeTranscript/no-usage.jsonl 2>&1)"
+claude_backfill_fail_status=$?
+set -e
+if [[ $claude_backfill_fail_status -eq 0 ]]; then
+  printf 'VERIFY FAIL: expected claude transcript backfill failure for no-usage fixture\n' >&2
+  exit 1
+fi
+require_contains "$claude_backfill_fail_output" "TokenmonApp bootstrap error:"
+claude_backfill_fail_probe="$(probe_backfill_lane "$claude_backfill_fail_db" claude)"
+require_contains "$claude_backfill_fail_probe" "backfill_started_count=1"
+require_contains "$claude_backfill_fail_probe" "backfill_completed_count=1"
+require_contains "$claude_backfill_fail_probe" "latest_backfill_status=failed"
+require_contains "$claude_backfill_fail_probe" "latest_errors_count=1"
+require_contains "$claude_backfill_fail_probe" "latest_health_state=degraded"
+printf 'VERIFY PASS: claude transcript backfill failure audit\n'
+
+codex_hook_db="$tmpdir/codex-hook.sqlite"
+tokenmon_app_cmd --tokenmon-db-init --db "$codex_hook_db" >/dev/null 2>&1
+set_gameplay_started_at "$codex_hook_db"
+codex_hook_start_output="$(tokenmon_app_cmd --tokenmon-provider-codex-hook-import --db "$codex_hook_db" --input Fixtures/CodexHooks/session-start.json --verbose 2>&1)"
+require_contains "$codex_hook_start_output" "codex hook import complete"
+require_contains "$codex_hook_start_output" "hook_event_name: SessionStart"
+require_contains "$codex_hook_start_output" "health_state: experimental"
+codex_hook_end_output="$(tokenmon_app_cmd --tokenmon-provider-codex-hook-import --db "$codex_hook_db" --input Fixtures/CodexHooks/session-end.json --verbose 2>&1)"
+require_contains "$codex_hook_end_output" "hook_event_name: SessionEnd"
+require_contains "$codex_hook_end_output" "session_state: ended"
+codex_hook_diagnose_output="$(tokenmon_app_cmd --tokenmon-diagnose --db "$codex_hook_db" 2>&1)"
+require_contains "$codex_hook_diagnose_output" "source_mode: codex_interactive_hook_assisted"
+require_contains "$codex_hook_diagnose_output" "health_state: experimental"
+require_contains "$codex_hook_diagnose_output" "Codex interactive hooks detected; token capture is experimental"
+printf 'VERIFY PASS: codex interactive hooks metadata path\n'
+
+codex_backfill_db="$tmpdir/codex-backfill.sqlite"
+tokenmon_app_cmd --tokenmon-db-init --db "$codex_backfill_db" >/dev/null 2>&1
+set_gameplay_started_at "$codex_backfill_db"
+tokenmon_app_cmd --tokenmon-seed-species --db "$codex_backfill_db" >/dev/null 2>&1
+codex_backfill_hook_output="$(tokenmon_app_cmd --tokenmon-provider-codex-hook-import --db "$codex_backfill_db" --input Fixtures/CodexHooks/session-start.json --verbose 2>&1)"
+require_contains "$codex_backfill_hook_output" "codex hook import complete"
+cat >"$tmpdir/codex-stop-hook.json" <<'JSON'
+{
+  "session_id": "codex_transcript_fixture",
+  "transcript_path": "Fixtures/CodexTranscript/token-counts.jsonl",
+  "cwd": "/tmp/tokenmon-fixture",
+  "hook_event_name": "Stop",
+  "model": "gpt-5.4"
+}
+JSON
+codex_backfill_stop_output="$(tokenmon_app_cmd --tokenmon-provider-codex-hook-import --db "$codex_backfill_db" --input "$tmpdir/codex-stop-hook.json" --verbose 2>&1)"
+require_contains "$codex_backfill_stop_output" "hook_event_name: Stop"
+require_contains "$codex_backfill_stop_output" "transcript_backfill_status: queued"
+codex_backfill_smoke_output="$(tokenmon_app_cmd --smoke-test --db "$codex_backfill_db" 2>&1)"
+require_contains "$codex_backfill_smoke_output" "smoke_test: ok"
+codex_backfill_summary="$(tokenmon_app_cmd --tokenmon-summary --db "$codex_backfill_db" 2>&1)"
+require_contains "$codex_backfill_summary" "usage_samples: 2"
+require_contains "$codex_backfill_summary" "total_normalized_tokens: 0"
+require_contains "$codex_backfill_summary" "tokens_since_last_encounter: 0"
+require_contains "$codex_backfill_summary" "total_encounters: 0"
+codex_backfill_diagnose_output="$(tokenmon_app_cmd --tokenmon-diagnose --db "$codex_backfill_db" 2>&1)"
+require_contains "$codex_backfill_diagnose_output" "offline_dashboard_recovery: automatic_supported"
+require_contains "$codex_backfill_diagnose_output" "health_state: experimental"
+require_contains "$codex_backfill_diagnose_output" "last_backfill_status: completed"
+printf 'VERIFY PASS: codex transcript backfill via hook stop\n'
+
+codex_backfill_fail_db="$tmpdir/codex-backfill-fail.sqlite"
+tokenmon_app_cmd --tokenmon-db-init --db "$codex_backfill_fail_db" >/dev/null 2>&1
+set_gameplay_started_at "$codex_backfill_fail_db"
+tokenmon_app_cmd --tokenmon-seed-species --db "$codex_backfill_fail_db" >/dev/null 2>&1
+cat >"$tmpdir/codex-stop-hook-fail.json" <<'JSON'
+{
+  "session_id": "codex_transcript_fixture",
+  "transcript_path": "Fixtures/CodexTranscript/no-usage.jsonl",
+  "cwd": "/tmp/tokenmon-fixture",
+  "hook_event_name": "Stop",
+  "model": "gpt-5.4"
+}
+JSON
+codex_backfill_fail_output="$(tokenmon_app_cmd --tokenmon-provider-codex-hook-import --db "$codex_backfill_fail_db" --input "$tmpdir/codex-stop-hook-fail.json" --verbose 2>&1)"
+require_contains "$codex_backfill_fail_output" "hook_event_name: Stop"
+require_contains "$codex_backfill_fail_output" "transcript_backfill_status: queued"
+codex_backfill_fail_smoke="$(tokenmon_app_cmd --smoke-test --db "$codex_backfill_fail_db" 2>&1)"
+require_contains "$codex_backfill_fail_smoke" "smoke_test: ok"
+codex_backfill_fail_diagnose="$(tokenmon_app_cmd --tokenmon-diagnose --db "$codex_backfill_fail_db" 2>&1)"
+require_contains "$codex_backfill_fail_diagnose" "offline_dashboard_recovery: automatic_supported"
+require_contains "$codex_backfill_fail_diagnose" "health_state: experimental"
+require_contains "$codex_backfill_fail_diagnose" "last_backfill_status: failed"
+printf 'VERIFY PASS: codex transcript backfill failure audit\n'
+
+backfill_db="$tmpdir/backfill.sqlite"
+tokenmon_app_cmd --tokenmon-db-init --db "$backfill_db" >/dev/null 2>&1
+set_gameplay_started_at "$backfill_db"
+backfill_output="$(tokenmon_app_cmd --tokenmon-backfill codex --db "$backfill_db" --transcript Fixtures/CodexTranscript/token-counts.jsonl --session-id codex_transcript_fixture 2>&1)"
+require_contains "$backfill_output" "backfill run complete"
+require_contains "$backfill_output" "provider: codex"
+require_contains "$backfill_output" "mode: transcript_backfill"
+require_contains "$backfill_output" "status: completed"
+backfill_diagnose_output="$(tokenmon_app_cmd --tokenmon-diagnose --db "$backfill_db" 2>&1)"
+require_contains "$backfill_diagnose_output" "last_backfill_mode: transcript_backfill"
+require_contains "$backfill_diagnose_output" "last_backfill_status: completed"
+printf 'VERIFY PASS: codex transcript backfill command path\n'
+
+claude_diagnose_output="$(tokenmon_app_cmd --tokenmon-diagnose --db "$claude_statusline_db" 2>&1)"
+require_contains "$claude_diagnose_output" "[claude]"
+require_contains "$claude_diagnose_output" "source_mode: claude_statusline_live"
+require_contains "$claude_diagnose_output" "health_state: active"
+printf 'VERIFY PASS: diagnose claude statusline mode\n'
+record_timing "provider_fixtures" "provider_onboarding_and_backfill" "$provider_fixtures_started_at"
+
+release_bundle_started_at="$(timing_now)"
+release_dir="$tmpdir/release-artifacts"
+sparkle_key_dir="$tmpdir/sparkle-keys"
+mkdir -p "$sparkle_key_dir"
+sparkle_key_output="$("$ROOT/scripts/generate-sparkle-keys" --private-key-out "$sparkle_key_dir/private.txt" 2>&1)"
+require_contains "$sparkle_key_output" "public_key="
+require_contains "$sparkle_key_output" "private_key_path=$sparkle_key_dir/private.txt"
+sparkle_public_key="$(printf '%s\n' "$sparkle_key_output" | sed -n 's/^public_key=//p')"
+[[ -n "$sparkle_public_key" ]] || { printf 'VERIFY FAIL: missing generated Sparkle public key\n' >&2; exit 1; }
+[[ -f "$sparkle_key_dir/private.txt" ]] || { printf 'VERIFY FAIL: missing generated Sparkle private key file\n' >&2; exit 1; }
+release_config_dry_run_output="$("$ROOT/scripts/configure-github-release" \
+  --repo "$public_release_repo" \
+  --sparkle-private-key-file "$sparkle_key_dir/private.txt" \
+  --csc-link "dummy-csc-link" \
+  --csc-key-password "dummy-password" \
+  --apple-id "maintainer@example.com" \
+  --apple-id-password "dummy-app-password" \
+  --apple-team-id "TEAM123456" \
+  --dry-run 2>&1)"
+require_contains "$release_config_dry_run_output" "dry_run=yes"
+require_contains "$release_config_dry_run_output" "dry_run_variable repo=$public_release_repo name=SPARKLE_PUBLIC_ED_KEY"
+require_contains "$release_config_dry_run_output" "dry_run_secret repo=$public_release_repo name=SPARKLE_ED_PRIVATE_KEY"
+require_contains "$release_config_dry_run_output" "dry_run_secret repo=$public_release_repo name=CSC_LINK"
+require_contains "$release_config_dry_run_output" "dry_run_secret repo=$public_release_repo name=APPLE_ID"
+printf 'VERIFY PASS: github release configuration helper\n'
+
+fake_gh_dir="$tmpdir/fake-gh"
+mkdir -p "$fake_gh_dir"
+cat >"$fake_gh_dir/gh" <<EOF_FAKE_GH
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "\${1:-}" == "auth" && "\${2:-}" == "status" ]]; then
+  exit 0
+fi
+
+if [[ "\${1:-}" == "variable" && "\${2:-}" == "get" && "\${3:-}" == "SPARKLE_PUBLIC_ED_KEY" ]]; then
+  printf '%s\n' "\${TOKENMON_FAKE_GH_SPARKLE_KEY:-}"
+  exit 0
+fi
+
+if [[ "\${1:-}" == "api" ]]; then
+  for arg in "\$@"; do
+    if [[ "\$arg" == "repos/$public_release_repo/releases/generate-notes" ]]; then
+      cat <<EOF
+{"name":"Tokenmon \${TOKENMON_FAKE_GH_RELEASE_TAG:-v0.0.0}","body":"## What's Changed\n\n- Added automated README media capture.\n- Unified release notes for GitHub and Sparkle.\n\n## Full Changelog\n\n- https://github.com/$public_release_repo/compare/\${TOKENMON_FAKE_GH_PREVIOUS_TAG:-v0.0.0}...\${TOKENMON_FAKE_GH_RELEASE_TAG:-v0.0.0}"}
+EOF
+      exit 0
+    fi
+  done
+fi
+
+printf 'unexpected fake gh invocation: %s\n' "\$*" >&2
+exit 1
+EOF_FAKE_GH
+chmod +x "$fake_gh_dir/gh"
+
+release_output="$(PATH="$fake_gh_dir:$PATH" TOKENMON_FAKE_GH_SPARKLE_KEY="$sparkle_public_key" "$ROOT/scripts/build-release" --output "$release_dir" 2>&1)"
+require_contains "$release_output" "release_output="
+require_contains "$release_output" "app_bundle="
+require_contains "$release_output" "app_icon="
+require_contains "$release_output" "sparkle_public_key_source=github_variable"
+[[ -x "$release_dir/Tokenmon.app/Contents/MacOS/TokenmonApp" ]] || { printf 'VERIFY FAIL: missing release app bundle executable\n' >&2; exit 1; }
+[[ -f "$release_dir/Tokenmon.app/Contents/Resources/AppIcon.icns" ]] || { printf 'VERIFY FAIL: missing app icon bundle resource\n' >&2; exit 1; }
+[[ -d "$release_dir/Tokenmon.app/Contents/Resources/Tokenmon_TokenmonApp.bundle" ]] || { printf 'VERIFY FAIL: missing release app SwiftPM resource bundle\n' >&2; exit 1; }
+[[ -d "$release_dir/Tokenmon.app/Contents/Frameworks/Sparkle.framework" ]] || { printf 'VERIFY FAIL: missing Sparkle.framework in release app bundle\n' >&2; exit 1; }
+[[ -f "$release_dir/RELEASE_NOTES.txt" ]] || { printf 'VERIFY FAIL: missing release notes\n' >&2; exit 1; }
+[[ -f "$release_dir/FIRST_RUN_CHECKLIST.txt" ]] || { printf 'VERIFY FAIL: missing first-run checklist\n' >&2; exit 1; }
+codesign --verify --deep --strict "$release_dir/Tokenmon.app" >/dev/null 2>&1 || { printf 'VERIFY FAIL: release app bundle codesign verification failed\n' >&2; exit 1; }
+release_internal_tools_flag="$(/usr/libexec/PlistBuddy -c 'Print :TokenmonDeveloperToolsVisible' "$release_dir/Tokenmon.app/Contents/Info.plist" 2>/dev/null || true)"
+[[ -z "$release_internal_tools_flag" ]] || { printf 'VERIFY FAIL: release build should not carry developer tools override metadata\n' >&2; exit 1; }
+release_icon_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$release_dir/Tokenmon.app/Contents/Info.plist" 2>/dev/null || true)"
+[[ "$release_icon_name" == "AppIcon" ]] || { printf 'VERIFY FAIL: release build should set CFBundleIconFile=AppIcon\n' >&2; exit 1; }
+release_bundle_identifier="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$release_dir/Tokenmon.app/Contents/Info.plist" 2>/dev/null || true)"
+[[ "$release_bundle_identifier" == "com.aroido.tokenmon" ]] || { printf 'VERIFY FAIL: release build should set CFBundleIdentifier=com.aroido.tokenmon\n' >&2; exit 1; }
+release_feed_url="$(/usr/libexec/PlistBuddy -c 'Print :SUFeedURL' "$release_dir/Tokenmon.app/Contents/Info.plist" 2>/dev/null || true)"
+[[ "$release_feed_url" == "$public_release_feed_url" ]] || { printf 'VERIFY FAIL: release build should set the Sparkle feed URL\n' >&2; exit 1; }
+release_public_key="$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$release_dir/Tokenmon.app/Contents/Info.plist" 2>/dev/null || true)"
+[[ "$release_public_key" == "$sparkle_public_key" ]] || { printf 'VERIFY FAIL: release build should embed the Sparkle public key\n' >&2; exit 1; }
+release_app_smoke_output="$("$release_dir/Tokenmon.app/Contents/MacOS/TokenmonApp" --smoke-test --db "$db" 2>&1)"
+require_contains "$release_app_smoke_output" "smoke_test: ok"
+release_updater_status_db="$tmpdir/release-updater-status.sqlite"
+release_updater_status="$("$release_dir/Tokenmon.app/Contents/MacOS/TokenmonApp" --tokenmon-updater-status --db "$release_updater_status_db" 2>&1)"
+require_contains "$release_updater_status" "availability: available"
+require_contains "$release_updater_status" "feed_source: bundle_metadata"
+require_contains "$release_updater_status" "public_ed_key_source: bundle_metadata"
+require_contains "$release_updater_status" "custom_configuration_active: no"
+release_updater_override_db="$tmpdir/release-updater-override.sqlite"
+release_updater_override_write="$("$release_dir/Tokenmon.app/Contents/MacOS/TokenmonApp" \
+  --tokenmon-updater-write-override \
+  --db "$release_updater_override_db" \
+  --feed-url "https://example.com/tokenmon-staging/appcast.xml" \
+  --public-ed-key "$sparkle_public_key" 2>&1)"
+require_contains "$release_updater_override_write" "availability: available"
+require_contains "$release_updater_override_write" "feed_source: local_override_file"
+require_contains "$release_updater_override_write" "public_ed_key_source: local_override_file"
+release_updater_override_status="$("$release_dir/Tokenmon.app/Contents/MacOS/TokenmonApp" --tokenmon-updater-status --db "$release_updater_override_db" 2>&1)"
+require_contains "$release_updater_override_status" "configured_feed_url: https://example.com/tokenmon-staging/appcast.xml"
+require_contains "$release_updater_override_status" "custom_configuration_active: yes"
+release_updater_override_clear="$("$release_dir/Tokenmon.app/Contents/MacOS/TokenmonApp" --tokenmon-updater-clear-override --db "$release_updater_override_db" 2>&1)"
+require_contains "$release_updater_override_clear" "removed: yes"
+require_contains "$release_updater_override_clear" "feed_source: bundle_metadata"
+require_contains "$release_updater_override_clear" "public_ed_key_source: bundle_metadata"
+printf 'VERIFY PASS: local release build artifacts\n'
+record_timing "release_packaging" "release_bundle_sanity" "$release_bundle_started_at"
+
+release_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/Packaging/Tokenmon-Info.plist" 2>/dev/null || true)"
+[[ -n "$release_version" ]] || { printf 'VERIFY FAIL: missing release version from Packaging/Tokenmon-Info.plist\n' >&2; exit 1; }
+
+if [[ "$include_release_tooling" == "1" ]]; then
+  release_tooling_started_at="$(timing_now)"
+  release_archive_dir="$tmpdir/release-archive"
+  release_archive_output="$(ALLOW_UNSIGNED=1 SPARKLE_PUBLIC_ED_KEY="$sparkle_public_key" VERSION="$release_version" BUILD_NUMBER="999999" "$ROOT/scripts/build-release-archive" --output "$release_archive_dir" --app-bundle "$release_dir/Tokenmon.app" 2>&1)"
+  require_contains "$release_archive_output" "ZIP: $release_archive_dir/Tokenmon-$release_version-macos.zip"
+  require_contains "$release_archive_output" "DMG: $release_archive_dir/Tokenmon-$release_version.dmg"
+  require_contains "$release_archive_output" "Checksums: $release_archive_dir/SHA256SUMS.txt"
+  [[ -f "$release_archive_dir/Tokenmon-$release_version-macos.zip" ]] || { printf 'VERIFY FAIL: missing release zip archive\n' >&2; exit 1; }
+  [[ -f "$release_archive_dir/Tokenmon-$release_version.dmg" ]] || { printf 'VERIFY FAIL: missing release dmg archive\n' >&2; exit 1; }
+  [[ -f "$release_archive_dir/SHA256SUMS.txt" ]] || { printf 'VERIFY FAIL: missing release checksums\n' >&2; exit 1; }
+  [[ -f "$release_archive_dir/RELEASE_NOTES.md" ]] || { printf 'VERIFY FAIL: missing markdown release notes\n' >&2; exit 1; }
+  [[ -f "$release_archive_dir/RELEASE_NOTES.en.md" ]] || { printf 'VERIFY FAIL: missing english markdown release notes\n' >&2; exit 1; }
+  [[ -f "$release_archive_dir/RELEASE_NOTES.ko.md" ]] || { printf 'VERIFY FAIL: missing korean markdown release notes\n' >&2; exit 1; }
+  [[ -f "$release_archive_dir/RELEASE_NOTES.txt" ]] || { printf 'VERIFY FAIL: missing archived release notes for Sparkle appcast generation\n' >&2; exit 1; }
+  [[ -f "$release_archive_dir/RELEASE_NOTES.en.txt" ]] || { printf 'VERIFY FAIL: missing english text release notes\n' >&2; exit 1; }
+  [[ -f "$release_archive_dir/RELEASE_NOTES.ko.txt" ]] || { printf 'VERIFY FAIL: missing korean text release notes\n' >&2; exit 1; }
+  [[ -f "$release_archive_dir/RELEASE_TITLE" ]] || { printf 'VERIFY FAIL: missing release title metadata\n' >&2; exit 1; }
+  [[ -f "$release_archive_dir/RELEASE_TITLE.ko" ]] || { printf 'VERIFY FAIL: missing korean release title metadata\n' >&2; exit 1; }
+  release_zip_extract_dir="$tmpdir/release-zip-extract"
+  mkdir -p "$release_zip_extract_dir"
+  ditto -x -k "$release_archive_dir/Tokenmon-$release_version-macos.zip" "$release_zip_extract_dir"
+  [[ -d "$release_zip_extract_dir/Tokenmon.app/Contents/Resources/Tokenmon_TokenmonApp.bundle" ]] || { printf 'VERIFY FAIL: release zip should preserve the SwiftPM resource bundle under Contents/Resources\n' >&2; exit 1; }
+  release_zip_smoke_output="$("$release_zip_extract_dir/Tokenmon.app/Contents/MacOS/TokenmonApp" --smoke-test --db "$release_zip_extract_dir/release-zip-smoke.sqlite" 2>&1)"
+  require_contains "$release_zip_smoke_output" "smoke_test: ok"
+
+  generated_notes_dir="$tmpdir/generated-release-notes"
+  mkdir -p "$generated_notes_dir"
+  generated_notes_output="$(PATH="$fake_gh_dir:$PATH" GH_TOKEN="fake-token" TOKENMON_FAKE_GH_RELEASE_TAG="v$release_version" TOKENMON_FAKE_GH_PREVIOUS_TAG="v0.0.0" "$ROOT/scripts/generate-release-notes" \
+    --tag "v$release_version" \
+    --repo "$public_release_repo" \
+    --markdown-output "$generated_notes_dir/RELEASE_NOTES.md" \
+    --sparkle-output "$generated_notes_dir/RELEASE_NOTES.txt" \
+    --title-output "$generated_notes_dir/RELEASE_TITLE" 2>&1)"
+  require_contains "$generated_notes_output" "release_notes_source=github_api"
+  [[ -f "$generated_notes_dir/RELEASE_NOTES.md" ]] || { printf 'VERIFY FAIL: missing generated markdown release notes\n' >&2; exit 1; }
+  [[ -f "$generated_notes_dir/RELEASE_NOTES.en.md" ]] || { printf 'VERIFY FAIL: missing generated english markdown release notes\n' >&2; exit 1; }
+  [[ -f "$generated_notes_dir/RELEASE_NOTES.ko.md" ]] || { printf 'VERIFY FAIL: missing generated korean markdown release notes\n' >&2; exit 1; }
+  [[ -f "$generated_notes_dir/RELEASE_NOTES.txt" ]] || { printf 'VERIFY FAIL: missing generated sparkle release notes\n' >&2; exit 1; }
+  [[ -f "$generated_notes_dir/RELEASE_NOTES.en.txt" ]] || { printf 'VERIFY FAIL: missing generated english sparkle release notes\n' >&2; exit 1; }
+  [[ -f "$generated_notes_dir/RELEASE_NOTES.ko.txt" ]] || { printf 'VERIFY FAIL: missing generated korean sparkle release notes\n' >&2; exit 1; }
+  [[ -f "$generated_notes_dir/RELEASE_TITLE" ]] || { printf 'VERIFY FAIL: missing generated release title file\n' >&2; exit 1; }
+  [[ -f "$generated_notes_dir/RELEASE_TITLE.ko" ]] || { printf 'VERIFY FAIL: missing generated korean release title file\n' >&2; exit 1; }
+  generated_markdown_release_notes="$(cat "$generated_notes_dir/RELEASE_NOTES.md")"
+  require_contains "$generated_markdown_release_notes" "# English"
+  require_contains "$generated_markdown_release_notes" "# 한국어"
+  require_contains "$generated_markdown_release_notes" "## What's Changed"
+  generated_text_release_notes="$(cat "$generated_notes_dir/RELEASE_NOTES.txt")"
+  require_contains "$generated_text_release_notes" "What's Changed"
+  require_contains "$generated_text_release_notes" "한국어"
+
+  release_dmg_sha="$(shasum -a 256 "$release_archive_dir/Tokenmon-$release_version.dmg" | awk '{print $1}')"
+  cask_output="$("$ROOT/scripts/generate-homebrew-cask" --version "$release_version" --sha256 "$release_dmg_sha" --output "$release_archive_dir/tokenmon.rb" 2>&1)"
+  require_contains "$cask_output" "cask_output=$release_archive_dir/tokenmon.rb"
+  [[ -f "$release_archive_dir/tokenmon.rb" ]] || { printf 'VERIFY FAIL: missing generated Homebrew cask\n' >&2; exit 1; }
+  release_cask_contents="$(cat "$release_archive_dir/tokenmon.rb")"
+  require_contains "$release_cask_contents" 'cask "tokenmon" do'
+  require_contains "$release_cask_contents" "version \"$release_version\""
+  require_contains "$release_cask_contents" "sha256 \"$release_dmg_sha\""
+  require_contains "$release_cask_contents" "url \"https://github.com/$public_release_repo/releases/download/v#{version}/Tokenmon-#{version}.dmg\""
+  require_contains "$release_cask_contents" 'auto_updates true'
+  require_contains "$release_cask_contents" 'app "Tokenmon.app"'
+
+  appcast_output="$("$ROOT/scripts/generate-sparkle-appcast" \
+    --archive "$release_archive_dir/Tokenmon-$release_version.dmg" \
+    --tag "v$release_version" \
+    --release-notes "$release_archive_dir/RELEASE_NOTES.txt" \
+    --private-key-file "$sparkle_key_dir/private.txt" \
+    --output "$release_archive_dir/appcast.xml" 2>&1)"
+  require_contains "$appcast_output" "appcast_output=$release_archive_dir/appcast.xml"
+  require_contains "$appcast_output" "release_notes_output=$release_archive_dir/Tokenmon-$release_version.txt"
+  [[ -f "$release_archive_dir/appcast.xml" ]] || { printf 'VERIFY FAIL: missing generated Sparkle appcast\n' >&2; exit 1; }
+  [[ -f "$release_archive_dir/Tokenmon-$release_version.txt" ]] || { printf 'VERIFY FAIL: missing generated Sparkle release notes asset\n' >&2; exit 1; }
+  release_appcast_contents="$(cat "$release_archive_dir/appcast.xml")"
+  require_contains "$release_appcast_contents" "<sparkle:shortVersionString>$release_version</sparkle:shortVersionString>"
+  require_contains "$release_appcast_contents" "https://github.com/$public_release_repo/releases/download/v$release_version/Tokenmon-$release_version.dmg"
+  require_contains "$release_appcast_contents" "https://github.com/$public_release_repo/releases/download/v$release_version/Tokenmon-$release_version.txt"
+  require_contains "$release_appcast_contents" "sparkle:edSignature="
+
+  tap_repo_dir="$tmpdir/homebrew-tap"
+  mkdir -p "$tap_repo_dir"
+  git -C "$tap_repo_dir" init -q
+  tap_sync_output="$("$ROOT/scripts/sync-homebrew-tap" --tap-dir "$tap_repo_dir" --cask-file "$release_archive_dir/tokenmon.rb" --no-push 2>&1)"
+  require_contains "$tap_sync_output" "tap_updated=yes"
+  require_contains "$tap_sync_output" "tap_pushed=no"
+  [[ -f "$tap_repo_dir/Casks/tokenmon.rb" ]] || { printf 'VERIFY FAIL: missing synced cask in local tap repo\n' >&2; exit 1; }
+  tap_sync_repeat_output="$("$ROOT/scripts/sync-homebrew-tap" --tap-dir "$tap_repo_dir" --cask-file "$release_archive_dir/tokenmon.rb" --no-push 2>&1)"
+  require_contains "$tap_sync_repeat_output" "tap_updated=no"
+  printf 'VERIFY PASS: sparkle appcast generation, homebrew cask generation, and local tap sync\n'
+  record_timing "release_packaging" "release_archive_and_publish_dry_run" "$release_tooling_started_at"
+fi
+
+if [[ ! -x "$tokenmon_app_bin" ]]; then
+  swift_cmd build >/dev/null 2>&1
+  tokenmon_app_bin_dir="$(swift_cmd build --show-bin-path)"
+  tokenmon_app_bin="$tokenmon_app_bin_dir/TokenmonApp"
+  [[ -x "$tokenmon_app_bin" ]] || { printf 'VERIFY FAIL: missing rebuilt TokenmonApp at %s\n' "$tokenmon_app_bin" >&2; exit 1; }
+fi
+
+if [[ "$include_readme_screenshots" == "1" ]]; then
+  marketing_assets_started_at="$(timing_now)"
+  readme_screenshot_dir="$tmpdir/readme-screens"
+  readme_variant_dir="$readme_screenshot_dir/variants"
+  readme_screenshot_output="$(TOKENMON_APP_BIN="$tokenmon_app_bin" "$ROOT/scripts/capture-readme-screenshots" --allow-menu-bar-skip --output-dir "$readme_screenshot_dir" 2>&1)"
+  require_contains "$readme_screenshot_output" "screenshots_output=$readme_screenshot_dir"
+  require_contains "$readme_screenshot_output" "variant_screenshots_root=$readme_variant_dir"
+  require_contains "$readme_screenshot_output" "now_tab: $readme_screenshot_dir/now-tab.png"
+  require_contains "$readme_screenshot_output" "tokens_tab: $readme_screenshot_dir/tokens-tab.png"
+  require_contains "$readme_screenshot_output" "stats_tab: $readme_screenshot_dir/stats-tab.png"
+  require_contains "$readme_screenshot_output" "dex_capture_mode: actual_window"
+  require_contains "$readme_screenshot_output" "settings_capture_mode: actual_window"
+  if printf '%s' "$readme_screenshot_output" | grep -Fq "popover_capture_mode: hosted_borderless_window"; then
+    :
+  elif printf '%s' "$readme_screenshot_output" | grep -Fq "popover_capture_mode: actual_status_item_popover"; then
+    :
+  else
+    printf 'VERIFY FAIL: unsupported popover capture mode for readme screenshots\n' >&2
+    exit 1
+  fi
+  [[ -f "$readme_screenshot_dir/menu-overview.png" ]] || { printf 'VERIFY FAIL: missing menu screenshot\n' >&2; exit 1; }
+  [[ -f "$readme_screenshot_dir/now-tab.png" ]] || { printf 'VERIFY FAIL: missing now-tab screenshot\n' >&2; exit 1; }
+  [[ -f "$readme_screenshot_dir/tokens-tab.png" ]] || { printf 'VERIFY FAIL: missing tokens-tab screenshot\n' >&2; exit 1; }
+  [[ -f "$readme_screenshot_dir/stats-tab.png" ]] || { printf 'VERIFY FAIL: missing stats-tab screenshot\n' >&2; exit 1; }
+  [[ -f "$readme_screenshot_dir/seen-dex.png" ]] || { printf 'VERIFY FAIL: missing seen dex screenshot\n' >&2; exit 1; }
+  [[ -f "$readme_screenshot_dir/settings.png" ]] || { printf 'VERIFY FAIL: missing settings screenshot\n' >&2; exit 1; }
+  for language in english korean; do
+    for appearance in dark light; do
+      for asset in menu-hero.gif menu-overview.png now-tab.png tokens-tab.png stats-tab.png seen-dex.png settings.png; do
+        [[ -f "$readme_variant_dir/$language/$appearance/$asset" ]] || {
+          printf 'VERIFY FAIL: missing readme screenshot variant %s/%s/%s\n' "$language" "$appearance" "$asset" >&2
+          exit 1
+        }
+      done
+    done
+  done
+  grep -Fq "assets/screenshots/variants/english/dark/menu-hero.gif" README.md || {
+    printf 'VERIFY FAIL: README.md missing english screenshot path\n' >&2
+    exit 1
+  }
+  grep -Fq "assets/screenshots/variants/english/dark/menu-overview.png" README.md || {
+    printf 'VERIFY FAIL: README.md missing english menu screenshot path\n' >&2
+    exit 1
+  }
+  grep -Fq "assets/screenshots/variants/korean/dark/menu-hero.gif" README.ko.md || {
+    printf 'VERIFY FAIL: README.ko.md missing korean screenshot path\n' >&2
+    exit 1
+  }
+  grep -Fq "assets/screenshots/variants/korean/dark/menu-overview.png" README.ko.md || {
+    printf 'VERIFY FAIL: README.ko.md missing korean menu screenshot path\n' >&2
+    exit 1
+  }
+  if printf '%s' "$readme_screenshot_output" | grep -Fq "menu_bar_capture_status: skipped"; then
+    require_contains "$readme_screenshot_output" "menu_bar_capture_reason:"
+  else
+    require_contains "$readme_screenshot_output" "menu_bar_capture_mode: actual_status_item"
+    require_contains "$readme_screenshot_output" "menu_bar_capture_status: captured"
+    require_contains "$readme_screenshot_output" "hero_gif: $readme_screenshot_dir/menu-hero.gif"
+    [[ -f "$readme_screenshot_dir/menu-hero.gif" ]] || { printf 'VERIFY FAIL: missing menu hero GIF\n' >&2; exit 1; }
+  fi
+  printf 'VERIFY PASS: readme media generation\n'
+  record_timing "marketing_assets" "readme_screenshots" "$marketing_assets_started_at"
+fi
+
+late_smoke_started_at="$(timing_now)"
+app_auto_ingest_db="$tmpdir/app-auto.sqlite"
+tokenmon_app_cmd --tokenmon-db-init --db "$app_auto_ingest_db" >/dev/null 2>&1
+set_gameplay_started_at "$app_auto_ingest_db"
+set_live_gameplay_started_at "$app_auto_ingest_db" "2026-04-05T00:00:00Z"
+tokenmon_app_cmd --tokenmon-seed-species --db "$app_auto_ingest_db" >/dev/null 2>&1
+app_auto_ingest_inbox_dir="$(dirname "$app_auto_ingest_db")/Inbox"
+mkdir -p "$app_auto_ingest_inbox_dir"
+cp Fixtures/Inbox/encounter-threshold-single.ndjson "$app_auto_ingest_inbox_dir/codex.ndjson"
+app_auto_ingest_smoke_output="$(tokenmon_app_cmd --smoke-test --db "$app_auto_ingest_db" 2>&1)"
+require_contains "$app_auto_ingest_smoke_output" "smoke_test: ok"
+require_contains "$app_auto_ingest_smoke_output" "usage_samples: 0"
+require_contains "$app_auto_ingest_smoke_output" "total_encounters: 0"
+app_auto_ingest_summary="$(tokenmon_app_cmd --tokenmon-summary --db "$app_auto_ingest_db" 2>&1)"
+require_contains "$app_auto_ingest_summary" "usage_samples: 1"
+require_contains "$app_auto_ingest_summary" "total_normalized_tokens: 0"
+require_contains "$app_auto_ingest_summary" "total_encounters: 0"
+printf 'VERIFY PASS: menubar app startup auto-ingest\n'
+
+zero_probe="$(probe_cli_lane "$db")"
+zero_status_output="$(tokenmon_app_cmd --tokenmon-status --db "$db" 2>&1)"
+require_contains "$zero_status_output" "current run"
+require_contains "$zero_status_output" "total_normalized_tokens: $(probe_value "$zero_probe" total_normalized_tokens)"
+require_contains "$zero_status_output" "tokens_since_last_encounter: $(probe_value "$zero_probe" tokens_since_last_encounter)"
+require_contains "$zero_status_output" "next_encounter_threshold_tokens: $(probe_value "$zero_probe" next_encounter_threshold_tokens)"
+require_contains "$zero_status_output" "tokens_until_next_encounter: $(probe_value "$zero_probe" tokens_until_next_encounter)"
+require_contains "$zero_status_output" "total_encounters: $(probe_value "$zero_probe" total_encounters)"
+require_contains "$zero_status_output" "total_captures: $(probe_value "$zero_probe" total_captures)"
+require_contains "$zero_status_output" "recent_encounters: $(probe_value "$zero_probe" recent_encounters)"
+printf 'VERIFY PASS: zero-state status command\n'
+
+zero_dex_seen_output="$(tokenmon_app_cmd --tokenmon-dex seen --db "$db" 2>&1)"
+require_contains "$zero_dex_seen_output" "dex seen"
+require_contains "$zero_dex_seen_output" "entries: $(probe_value "$zero_probe" dex_seen_entries)"
+printf 'VERIFY PASS: zero-state dex seen command\n'
+
+zero_dex_captured_output="$(tokenmon_app_cmd --tokenmon-dex captured --db "$db" 2>&1)"
+require_contains "$zero_dex_captured_output" "dex captured"
+require_contains "$zero_dex_captured_output" "entries: $(probe_value "$zero_probe" dex_captured_entries)"
+printf 'VERIFY PASS: zero-state dex captured command\n'
+
+accepted_output="$(tokenmon_app_cmd --tokenmon-ingest-inbox Fixtures/Inbox/accepted-single.ndjson --db "$db" 2>&1)"
+require_contains "$accepted_output" "accepted: 1"
+require_contains "$accepted_output" "duplicates: 0"
+require_contains "$accepted_output" "rejected: 0"
+printf 'VERIFY PASS: accepted fixture ingest\n'
+accepted_summary="$(tokenmon_app_cmd --tokenmon-summary --db "$db" 2>&1)"
+require_contains "$accepted_summary" "usage_samples: 1"
+require_contains "$accepted_summary" "domain_events: 2"
+require_contains "$accepted_summary" "tokens_since_last_encounter: 2000"
+require_contains "$accepted_summary" "total_encounters: 0"
+printf 'VERIFY PASS: accepted fixture exploration/domain-event summary\n'
+
+restart_db="$tmpdir/restart.sqlite"
+restart_inbox="$tmpdir/restart.ndjson"
+restart_source_key="restart-resume"
+cp Fixtures/Inbox/accepted-single.ndjson "$restart_inbox"
+tokenmon_app_cmd --tokenmon-db-init --db "$restart_db" >/dev/null 2>&1
+set_gameplay_started_at "$restart_db"
+set_live_gameplay_started_at "$restart_db"
+tokenmon_app_cmd --tokenmon-seed-species --db "$restart_db" >/dev/null 2>&1
+restart_first_output="$(tokenmon_app_cmd --tokenmon-ingest-inbox "$restart_inbox" --db "$restart_db" --source-key "$restart_source_key" 2>&1)"
+require_contains "$restart_first_output" "accepted: 1"
+require_contains "$restart_first_output" "checkpoint_line: 1"
+restart_second_output="$(tokenmon_app_cmd --tokenmon-ingest-inbox "$restart_inbox" --db "$restart_db" --source-key "$restart_source_key" 2>&1)"
+require_contains "$restart_second_output" "accepted: 0"
+require_contains "$restart_second_output" "duplicates: 0"
+require_contains "$restart_second_output" "usage_samples: 0"
+restart_source_probe="$(probe_ingest_source "$restart_db" "$restart_source_key")"
+require_contains "$restart_source_probe" "source_found=1"
+require_contains "$restart_source_probe" "last_line_number=1"
+cat Fixtures/Inbox/encounter-threshold-single.ndjson >> "$restart_inbox"
+restart_third_output="$(tokenmon_app_cmd --tokenmon-ingest-inbox "$restart_inbox" --db "$restart_db" --source-key "$restart_source_key" 2>&1)"
+require_contains "$restart_third_output" "accepted: 1"
+require_contains "$restart_third_output" "checkpoint_line: 2"
+restart_summary="$(tokenmon_app_cmd --tokenmon-summary --db "$restart_db" 2>&1)"
+restart_probe="$(probe_cli_lane "$restart_db")"
+restart_encounter_count="$(probe_value "$restart_probe" total_encounters)"
+require_contains "$restart_summary" "usage_samples: 2"
+require_contains "$restart_summary" "total_normalized_tokens: 21409200"
+require_contains "$restart_summary" "tokens_since_last_encounter: $(probe_value "$restart_probe" tokens_since_last_encounter)"
+require_contains "$restart_summary" "total_encounters: $restart_encounter_count"
+printf 'VERIFY PASS: restart resume and append-only ingest\n'
+
+threshold_db="$tmpdir/threshold.sqlite"
+tokenmon_app_cmd --tokenmon-db-init --db "$threshold_db" >/dev/null 2>&1
+set_gameplay_started_at "$threshold_db"
+set_live_gameplay_started_at "$threshold_db"
+tokenmon_app_cmd --tokenmon-seed-species --db "$threshold_db" >/dev/null 2>&1
+threshold_output="$(tokenmon_app_cmd --tokenmon-ingest-inbox Fixtures/Inbox/encounter-threshold-single.ndjson --db "$threshold_db" 2>&1)"
+require_contains "$threshold_output" "accepted: 1"
+threshold_summary="$(tokenmon_app_cmd --tokenmon-summary --db "$threshold_db" 2>&1)"
+threshold_cli_probe="$(probe_cli_lane "$threshold_db")"
+threshold_encounter_count="$(probe_value "$threshold_cli_probe" total_encounters)"
+require_integer_at_least "$threshold_encounter_count" 1 "threshold fixture encounter count"
+require_contains "$threshold_summary" "tokens_since_last_encounter: $(probe_value "$threshold_cli_probe" tokens_since_last_encounter)"
+require_contains "$threshold_summary" "next_encounter_threshold_tokens: $(probe_value "$threshold_cli_probe" next_encounter_threshold_tokens)"
+require_contains "$threshold_summary" "total_encounters: $threshold_encounter_count"
+printf 'VERIFY PASS: threshold crossing bookkeeping\n'
+
+threshold_probe="$(probe_encounter_lane "$threshold_db" "$threshold_encounter_count")"
+require_contains "$threshold_probe" "threshold_event_count_matches_expected=1"
+require_contains "$threshold_probe" "field_selected_count_matches_expected=1"
+require_contains "$threshold_probe" "rarity_selected_count_matches_expected=1"
+require_contains "$threshold_probe" "species_selected_count_matches_expected=1"
+require_contains "$threshold_probe" "encounter_spawned_count_matches_expected=1"
+require_contains "$threshold_probe" "capture_resolved_matches_encounter_count=1"
+require_contains "$threshold_probe" "seen_dex_updated_matches_encounter_count=1"
+require_contains "$threshold_probe" "captured_dex_updated_matches_captured_count=1"
+require_contains "$threshold_probe" "domain_event_count_matches_expected=1"
+require_contains "$threshold_probe" "state_total_encounters=$threshold_encounter_count"
+require_contains "$threshold_probe" "dex_seen_matches_unique_encounter_species=1"
+require_contains "$threshold_probe" "dex_captured_matches_unique_captured_species=1"
+require_contains "$threshold_probe" "state_total_captures_matches_captured_count=1"
+require_contains "$threshold_probe" "dex_seen_links_valid=1"
+require_contains "$threshold_probe" "dex_captured_links_valid=1"
+
+if [[ "$threshold_probe" == *"encounter_count=0"* ]]; then
+  require_contains "$threshold_probe" "capture_resolved_event_count=0"
+  printf 'VERIFY INFO: encounter resolution lane armed; no encounter rows emitted on current branch\n'
+else
+  require_contains "$threshold_probe" "encounter_count=$threshold_encounter_count"
+  require_contains "$threshold_probe" "dex_seen_count=$(probe_value "$threshold_cli_probe" dex_seen_entries)"
+  require_contains "$threshold_probe" "capture_resolved_event_count=$threshold_encounter_count"
+  require_contains "$threshold_probe" "field_matches_species=1"
+  require_contains "$threshold_probe" "capture_probability_matches_rarity=1"
+  require_contains "$threshold_probe" "capture_roll_in_range=1"
+  require_contains "$threshold_probe" "outcome_matches_roll=1"
+  require_contains "$threshold_probe" "capture_resolved_payload_matches=1"
+  require_contains "$threshold_probe" "encounter_threshold_sequence_matches=1"
+  printf 'VERIFY PASS: encounter resolution single-threshold invariants\n'
+fi
+
+threshold_status_output="$(tokenmon_app_cmd --tokenmon-status --db "$threshold_db" 2>&1)"
+require_contains "$threshold_status_output" "current run"
+require_contains "$threshold_status_output" "total_normalized_tokens: $(probe_value "$threshold_cli_probe" total_normalized_tokens)"
+require_contains "$threshold_status_output" "tokens_since_last_encounter: $(probe_value "$threshold_cli_probe" tokens_since_last_encounter)"
+require_contains "$threshold_status_output" "next_encounter_threshold_tokens: $(probe_value "$threshold_cli_probe" next_encounter_threshold_tokens)"
+require_contains "$threshold_status_output" "tokens_until_next_encounter: $(probe_value "$threshold_cli_probe" tokens_until_next_encounter)"
+require_contains "$threshold_status_output" "total_encounters: $(probe_value "$threshold_cli_probe" total_encounters)"
+require_contains "$threshold_status_output" "total_captures: $(probe_value "$threshold_cli_probe" total_captures)"
+require_contains "$threshold_status_output" "recent_encounters: $(probe_value "$threshold_cli_probe" recent_encounters)"
+printf 'VERIFY PASS: populated status command\n'
+
+threshold_verbose_status_output="$(tokenmon_app_cmd --tokenmon-status --db "$threshold_db" --verbosity verbose 2>&1)"
+require_contains "$threshold_verbose_status_output" "provider_health:"
+require_contains "$threshold_verbose_status_output" "- claude | support=first_class"
+require_contains "$threshold_verbose_status_output" "- codex | support=best_effort"
+printf 'VERIFY PASS: explicit verbose override affects status output\n'
+
+threshold_dex_seen_output="$(tokenmon_app_cmd --tokenmon-dex seen --db "$threshold_db" 2>&1)"
+require_contains "$threshold_dex_seen_output" "dex seen"
+require_contains "$threshold_dex_seen_output" "entries: $(probe_value "$threshold_cli_probe" dex_seen_entries)"
+printf 'VERIFY PASS: populated dex seen command\n'
+
+threshold_dex_captured_output="$(tokenmon_app_cmd --tokenmon-dex captured --db "$threshold_db" 2>&1)"
+require_contains "$threshold_dex_captured_output" "dex captured"
+require_contains "$threshold_dex_captured_output" "entries: $(probe_value "$threshold_cli_probe" dex_captured_entries)"
+printf 'VERIFY PASS: populated dex captured command\n'
+
+threshold_app_smoke_output="$(tokenmon_app_cmd --smoke-test --db "$threshold_db" 2>&1)"
+require_contains "$threshold_app_smoke_output" "smoke_test: ok"
+require_contains "$threshold_app_smoke_output" "animation_placeholder: field_effect_scene"
+if [[ "$threshold_app_smoke_output" == *"latest_encounter: none"* ]]; then
+  printf 'VERIFY FAIL: expected threshold smoke to report a latest encounter\n' >&2
+  exit 1
+fi
+require_contains "$threshold_app_smoke_output" "seen_species: $(probe_value "$threshold_cli_probe" dex_seen_entries)"
+require_contains "$threshold_app_smoke_output" "captured_species: $(probe_value "$threshold_cli_probe" dex_captured_entries)"
+printf 'VERIFY PASS: menubar app populated-db smoke\n'
+
+threshold_provider_visibility_smoke="$(tokenmon_app_cmd --smoke-test --db "$threshold_db" --smoke-provider-status-visibility false 2>&1)"
+require_contains "$threshold_provider_visibility_smoke" "provider_status_visibility: false"
+require_contains "$threshold_provider_visibility_smoke" "provider_status_entries_visible: 0"
+printf 'VERIFY PASS: provider status visibility setting smoke\n'
+
+threshold_watch_output="$(tokenmon_app_cmd --tokenmon-watch --db "$threshold_db" --iterations 1 --interval-ms 0 2>&1)"
+require_contains "$threshold_watch_output" "watch iteration 1/1"
+require_contains "$threshold_watch_output" "current run"
+require_contains "$threshold_watch_output" "total_encounters: $(probe_value "$threshold_cli_probe" total_encounters)"
+printf 'VERIFY PASS: bounded watch command\n'
+
+threshold_replay_inbox="$tmpdir/threshold-replay.ndjson"
+cp Fixtures/Inbox/encounter-threshold-single.ndjson "$threshold_replay_inbox"
+threshold_replay_output="$(tokenmon_app_cmd --tokenmon-ingest-inbox "$threshold_replay_inbox" --db "$threshold_db" 2>&1)"
+require_contains "$threshold_replay_output" "accepted: 0"
+require_contains "$threshold_replay_output" "duplicates: 1"
+threshold_replay_probe="$(probe_encounter_lane "$threshold_db" "$threshold_encounter_count")"
+require_contains "$threshold_replay_probe" "threshold_event_count_matches_expected=1"
+require_contains "$threshold_replay_probe" "field_selected_count_matches_expected=1"
+require_contains "$threshold_replay_probe" "rarity_selected_count_matches_expected=1"
+require_contains "$threshold_replay_probe" "species_selected_count_matches_expected=1"
+require_contains "$threshold_replay_probe" "encounter_spawned_count_matches_expected=1"
+require_contains "$threshold_replay_probe" "capture_resolved_matches_encounter_count=1"
+require_contains "$threshold_replay_probe" "seen_dex_updated_matches_encounter_count=1"
+require_contains "$threshold_replay_probe" "captured_dex_updated_matches_captured_count=1"
+require_contains "$threshold_replay_probe" "domain_event_count_matches_expected=1"
+if [[ "$threshold_probe" == *"encounter_count=0"* ]]; then
+  require_contains "$threshold_replay_probe" "encounter_count=0"
+  require_contains "$threshold_replay_probe" "capture_resolved_event_count=0"
+else
+  require_contains "$threshold_replay_probe" "encounter_count=$threshold_encounter_count"
+  require_contains "$threshold_replay_probe" "capture_resolved_event_count=$threshold_encounter_count"
+fi
+printf 'VERIFY PASS: threshold fixture replay remains immutable\n'
+
+partial_resume_db="$tmpdir/partial-resume.sqlite"
+partial_resume_inbox="$tmpdir/partial-resume.ndjson"
+partial_resume_source_key="partial-resume"
+tokenmon_app_cmd --tokenmon-db-init --db "$partial_resume_db" >/dev/null 2>&1
+set_gameplay_started_at "$partial_resume_db"
+set_live_gameplay_started_at "$partial_resume_db"
+tokenmon_app_cmd --tokenmon-seed-species --db "$partial_resume_db" >/dev/null 2>&1
+first_line="$(cat Fixtures/Inbox/accepted-single.ndjson)"
+second_line="$(cat Fixtures/Inbox/encounter-threshold-single.ndjson)"
+printf '%s\n' "$first_line" > "$partial_resume_inbox"
+printf '%s' "${second_line:0:180}" >> "$partial_resume_inbox"
+partial_resume_first_output="$(tokenmon_app_cmd --tokenmon-ingest-inbox "$partial_resume_inbox" --db "$partial_resume_db" --source-key "$partial_resume_source_key" 2>&1)"
+require_contains "$partial_resume_first_output" "accepted: 1"
+require_contains "$partial_resume_first_output" "partial_trailing: 1"
+partial_resume_probe_before="$(probe_ingest_source "$partial_resume_db" "$partial_resume_source_key")"
+require_contains "$partial_resume_probe_before" "last_line_number=1"
+printf '%s\n' "${second_line:180}" >> "$partial_resume_inbox"
+partial_resume_second_output="$(tokenmon_app_cmd --tokenmon-ingest-inbox "$partial_resume_inbox" --db "$partial_resume_db" --source-key "$partial_resume_source_key" 2>&1)"
+require_contains "$partial_resume_second_output" "accepted: 1"
+require_contains "$partial_resume_second_output" "partial_trailing: 0"
+partial_resume_summary="$(tokenmon_app_cmd --tokenmon-summary --db "$partial_resume_db" 2>&1)"
+partial_resume_probe="$(probe_cli_lane "$partial_resume_db")"
+require_contains "$partial_resume_summary" "usage_samples: 2"
+require_contains "$partial_resume_summary" "total_encounters: $(probe_value "$partial_resume_probe" total_encounters)"
+printf 'VERIFY PASS: partial-line resume after restart\n'
+
+multi_threshold_db="$tmpdir/multi-threshold.sqlite"
+tokenmon_app_cmd --tokenmon-db-init --db "$multi_threshold_db" >/dev/null 2>&1
+set_gameplay_started_at "$multi_threshold_db"
+set_live_gameplay_started_at "$multi_threshold_db"
+tokenmon_app_cmd --tokenmon-seed-species --db "$multi_threshold_db" >/dev/null 2>&1
+multi_threshold_output="$(tokenmon_app_cmd --tokenmon-ingest-inbox Fixtures/Inbox/encounter-threshold-double.ndjson --db "$multi_threshold_db" 2>&1)"
+require_contains "$multi_threshold_output" "accepted: 1"
+multi_threshold_summary="$(tokenmon_app_cmd --tokenmon-summary --db "$multi_threshold_db" 2>&1)"
+multi_threshold_cli_probe="$(probe_cli_lane "$multi_threshold_db")"
+multi_threshold_encounter_count="$(probe_value "$multi_threshold_cli_probe" total_encounters)"
+require_integer_at_least "$multi_threshold_encounter_count" 2 "multi-threshold fixture encounter count"
+require_contains "$multi_threshold_summary" "tokens_since_last_encounter: $(probe_value "$multi_threshold_cli_probe" tokens_since_last_encounter)"
+require_contains "$multi_threshold_summary" "next_encounter_threshold_tokens: $(probe_value "$multi_threshold_cli_probe" next_encounter_threshold_tokens)"
+require_contains "$multi_threshold_summary" "total_encounters: $multi_threshold_encounter_count"
+printf 'VERIFY PASS: multi-threshold encounter bookkeeping\n'
+
+multi_threshold_probe="$(probe_encounter_lane "$multi_threshold_db" "$multi_threshold_encounter_count")"
+require_contains "$multi_threshold_probe" "threshold_event_count_matches_expected=1"
+require_contains "$multi_threshold_probe" "field_selected_count_matches_expected=1"
+require_contains "$multi_threshold_probe" "rarity_selected_count_matches_expected=1"
+require_contains "$multi_threshold_probe" "species_selected_count_matches_expected=1"
+require_contains "$multi_threshold_probe" "encounter_spawned_count_matches_expected=1"
+require_contains "$multi_threshold_probe" "capture_resolved_matches_encounter_count=1"
+require_contains "$multi_threshold_probe" "seen_dex_updated_matches_encounter_count=1"
+require_contains "$multi_threshold_probe" "captured_dex_updated_matches_captured_count=1"
+require_contains "$multi_threshold_probe" "domain_event_count_matches_expected=1"
+require_contains "$multi_threshold_probe" "state_total_encounters=$multi_threshold_encounter_count"
+require_contains "$multi_threshold_probe" "dex_seen_matches_unique_encounter_species=1"
+require_contains "$multi_threshold_probe" "dex_captured_matches_unique_captured_species=1"
+require_contains "$multi_threshold_probe" "state_total_captures_matches_captured_count=1"
+require_contains "$multi_threshold_probe" "dex_seen_links_valid=1"
+require_contains "$multi_threshold_probe" "dex_captured_links_valid=1"
+
+if [[ "$multi_threshold_probe" == *"encounter_count=0"* ]]; then
+  require_contains "$multi_threshold_probe" "capture_resolved_event_count=0"
+  printf 'VERIFY INFO: multi-threshold resolution lane armed; encounter rows still absent on current branch\n'
+else
+  require_contains "$multi_threshold_probe" "encounter_count=$multi_threshold_encounter_count"
+  require_contains "$multi_threshold_probe" "capture_resolved_event_count=$multi_threshold_encounter_count"
+  require_contains "$multi_threshold_probe" "field_matches_species=1"
+  require_contains "$multi_threshold_probe" "capture_probability_matches_rarity=1"
+  require_contains "$multi_threshold_probe" "capture_roll_in_range=1"
+  require_contains "$multi_threshold_probe" "outcome_matches_roll=1"
+  require_contains "$multi_threshold_probe" "capture_resolved_payload_matches=1"
+  require_contains "$multi_threshold_probe" "encounter_threshold_sequence_matches=1"
+  printf 'VERIFY PASS: multi-threshold encounter resolution invariants\n'
+fi
+
+multi_threshold_status_output="$(tokenmon_app_cmd --tokenmon-status --db "$multi_threshold_db" 2>&1)"
+require_contains "$multi_threshold_status_output" "recent_encounters: $(probe_value "$multi_threshold_cli_probe" recent_encounters)"
+require_contains "$multi_threshold_status_output" "total_encounters: $(probe_value "$multi_threshold_cli_probe" total_encounters)"
+printf 'VERIFY PASS: multi-threshold status recency count\n'
+
+duplicate_db="$tmpdir/duplicate.sqlite"
+tokenmon_app_cmd --tokenmon-db-init --db "$duplicate_db" >/dev/null 2>&1
+set_gameplay_started_at "$duplicate_db"
+duplicate_output="$(tokenmon_app_cmd --tokenmon-ingest-inbox Fixtures/Inbox/duplicate-replay.ndjson --db "$duplicate_db" 2>&1)"
+require_contains "$duplicate_output" "accepted: 1"
+require_contains "$duplicate_output" "duplicates: 1"
+printf 'VERIFY PASS: duplicate fingerprint replay\n'
+
+regression_db="$tmpdir/regression.sqlite"
+tokenmon_app_cmd --tokenmon-db-init --db "$regression_db" >/dev/null 2>&1
+set_gameplay_started_at "$regression_db"
+set_live_gameplay_started_at "$regression_db"
+tokenmon_app_cmd --tokenmon-seed-species --db "$regression_db" >/dev/null 2>&1
+regression_output="$(tokenmon_app_cmd --tokenmon-ingest-inbox Fixtures/Inbox/negative-total-regression.ndjson --db "$regression_db" 2>&1)"
+require_contains "$regression_output" "accepted: 1"
+require_contains "$regression_output" "rejected: 1"
+regression_summary="$(tokenmon_app_cmd --tokenmon-summary --db "$regression_db" 2>&1)"
+require_contains "$regression_summary" "provider_ingest_events: 2"
+require_contains "$regression_summary" "usage_samples: 1"
+require_contains "$regression_summary" "total_normalized_tokens: 3600"
+require_contains "$regression_summary" "tokens_since_last_encounter: 3600"
+require_contains "$regression_summary" "total_encounters: 0"
+printf 'VERIFY PASS: negative total regression does not corrupt exploration state\n'
+
+malformed_db="$tmpdir/malformed.sqlite"
+tokenmon_app_cmd --tokenmon-db-init --db "$malformed_db" >/dev/null 2>&1
+set_gameplay_started_at "$malformed_db"
+malformed_output="$(tokenmon_app_cmd --tokenmon-ingest-inbox Fixtures/Inbox/malformed-line.ndjson --db "$malformed_db" 2>&1)"
+require_contains "$malformed_output" "accepted: 1"
+require_contains "$malformed_output" "rejected: 1"
+printf 'VERIFY PASS: malformed line handling\n'
+
+partial_db="$tmpdir/partial.sqlite"
+partial_inbox="$tmpdir/partial.ndjson"
+tokenmon_app_cmd --tokenmon-db-init --db "$partial_db" >/dev/null 2>&1
+set_gameplay_started_at "$partial_db"
+printf '%s\n' '{"event_type":"provider_usage_sample","provider":"codex","source_mode":"codex_exec_json","provider_session_id":"thread_partial","observed_at":"2026-04-04T00:03:00Z","workspace_dir":"/tmp/tokenmon-fixture","model_slug":"gpt-5.4","transcript_path":null,"total_input_tokens":1000,"total_output_tokens":500,"total_cached_input_tokens":0,"normalized_total_tokens":1500,"provider_event_fingerprint":"codex:thread_partial:turn_001","raw_reference":{"kind":"jsonl","offset":"1","event_name":"turn.completed"}}' > "$partial_inbox"
+printf '%s' '{"event_type":"provider_usage_sample","provider":"codex"' >> "$partial_inbox"
+partial_output="$(tokenmon_app_cmd --tokenmon-ingest-inbox "$partial_inbox" --db "$partial_db" 2>&1)"
+require_contains "$partial_output" "accepted: 1"
+require_contains "$partial_output" "partial_trailing: 1"
+printf 'VERIFY PASS: partial trailing line handling\n'
+record_timing "smoke" "late_smoke_and_cli_invariants" "$late_smoke_started_at"
+
+printf 'VERIFY PASS: all checks completed\n'

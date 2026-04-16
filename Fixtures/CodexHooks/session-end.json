@@ -1,0 +1,7 @@
+{
+  "session_id": "codex_hook_fixture",
+  "transcript_path": "/tmp/codex-hook-fixture.jsonl",
+  "cwd": "/tmp/tokenmon-fixture",
+  "hook_event_name": "SessionEnd",
+  "model": "gpt-5.4"
+}

@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+archive_path=""
+output_path=""
+release_tag=""
+repository=""
+link_url=""
+private_key_file=""
+release_notes_path=""
+release_notes_output=""
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./scripts/generate-sparkle-appcast --archive <path-to-dmg> --tag <v0.1.0> [--repo <owner/name>] [--output <path>] [--private-key-file <path>] [--release-notes <path>]
+
+The private key may also be supplied through SPARKLE_ED_PRIVATE_KEY.
+EOF
+}
+
+find_sparkle_tool() {
+  local tool_name="$1"
+  find "$ROOT/.build" -type f -path "*/artifacts/*/bin/$tool_name" -print 2>/dev/null | sort | head -n 1
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --archive)
+      shift
+      archive_path="${1:-}"
+      ;;
+    --output)
+      shift
+      output_path="${1:-}"
+      ;;
+    --tag)
+      shift
+      release_tag="${1:-}"
+      ;;
+    --repo)
+      shift
+      repository="${1:-}"
+      ;;
+    --link)
+      shift
+      link_url="${1:-}"
+      ;;
+    --private-key-file)
+      shift
+      private_key_file="${1:-}"
+      ;;
+    --release-notes)
+      shift
+      release_notes_path="${1:-}"
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      printf 'Unsupported argument: %s\n' "$1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift || true
+done
+
+[[ -n "$archive_path" ]] || { printf 'Missing --archive\n' >&2; usage >&2; exit 1; }
+[[ -f "$archive_path" ]] || { printf 'Missing archive: %s\n' "$archive_path" >&2; exit 1; }
+[[ "$archive_path" == *.dmg ]] || { printf 'Sparkle appcast generation expects a DMG archive: %s\n' "$archive_path" >&2; exit 1; }
+[[ -n "$release_tag" ]] || { printf 'Missing --tag\n' >&2; usage >&2; exit 1; }
+
+if [[ -z "$repository" ]]; then
+  repository="$(/usr/libexec/PlistBuddy -c 'Print :TokenmonGitHubRepository' "$ROOT/Packaging/Tokenmon-Info.plist")"
+fi
+
+[[ "$repository" == */* ]] || { printf 'Repository must be in owner/name form: %s\n' "$repository" >&2; exit 1; }
+
+if [[ -z "$link_url" ]]; then
+  link_url="https://github.com/$repository"
+fi
+
+if [[ -z "$output_path" ]]; then
+  output_path="$(dirname "$archive_path")/appcast.xml"
+fi
+
+generate_appcast_bin="$(find_sparkle_tool generate_appcast)"
+[[ -x "$generate_appcast_bin" ]] || { printf 'Missing generate_appcast tool in .build artifacts. Run swift build first.\n' >&2; exit 1; }
+
+use_stdin_key=0
+if [[ -n "$private_key_file" ]]; then
+  [[ -f "$private_key_file" ]] || { printf 'Missing private key file: %s\n' "$private_key_file" >&2; exit 1; }
+elif [[ -n "${SPARKLE_ED_PRIVATE_KEY:-}" ]]; then
+  use_stdin_key=1
+else
+  printf 'Missing Sparkle private key. Use --private-key-file or SPARKLE_ED_PRIVATE_KEY.\n' >&2
+  exit 1
+fi
+
+staging_dir="$(mktemp -d)"
+trap 'rm -rf "$staging_dir"' EXIT
+
+archive_name="$(basename "$archive_path")"
+cp "$archive_path" "$staging_dir/$archive_name"
+
+if [[ -n "$release_notes_path" ]]; then
+  [[ -f "$release_notes_path" ]] || { printf 'Missing release notes file: %s\n' "$release_notes_path" >&2; exit 1; }
+  release_notes_output="$(dirname "$output_path")/${archive_name%.dmg}.txt"
+  cp "$release_notes_path" "$staging_dir/${archive_name%.dmg}.txt"
+fi
+
+download_prefix="https://github.com/$repository/releases/download/$release_tag/"
+
+if [[ "$use_stdin_key" == "1" ]]; then
+  (
+    cd "$staging_dir"
+    printf '%s' "${SPARKLE_ED_PRIVATE_KEY}" | "$generate_appcast_bin" \
+      --ed-key-file - \
+      --download-url-prefix "$download_prefix" \
+      --release-notes-url-prefix "$download_prefix" \
+      --link "$link_url" \
+      -o "$(basename "$output_path")" \
+      .
+  )
+else
+  (
+    cd "$staging_dir"
+    "$generate_appcast_bin" \
+      --ed-key-file "$private_key_file" \
+      --download-url-prefix "$download_prefix" \
+      --release-notes-url-prefix "$download_prefix" \
+      --link "$link_url" \
+      -o "$(basename "$output_path")" \
+      .
+  )
+fi
+
+mkdir -p "$(dirname "$output_path")"
+cp "$staging_dir/$(basename "$output_path")" "$output_path"
+if [[ -n "$release_notes_output" ]]; then
+  cp "$staging_dir/${archive_name%.dmg}.txt" "$release_notes_output"
+fi
+
+printf 'appcast_output=%s\n' "$output_path"
+if [[ -n "$release_notes_output" ]]; then
+  printf 'release_notes_output=%s\n' "$release_notes_output"
+fi

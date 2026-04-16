@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"thread_exec_two_turns"}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"ignored"}}
+{"type":"turn.completed","thread_id":"thread_exec_two_turns","turn_id":"turn_001","timestamp":"2026-04-04T00:12:00Z","cwd":"/tmp/tokenmon-fixture","model":"gpt-5.4","usage":{"input_tokens":1200,"cached_input_tokens":200,"output_tokens":600}}
+{"type":"turn.completed","thread_id":"thread_exec_two_turns","turn_id":"turn_002","timestamp":"2026-04-04T00:13:00Z","cwd":"/tmp/tokenmon-fixture","model":"gpt-5.4","usage":{"input_tokens":1000,"cached_input_tokens":100,"output_tokens":500}}

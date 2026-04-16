@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+tap_repo=""
+tap_dir=""
+cask_file=""
+cask_token="tokenmon"
+commit_message=""
+push_changes="yes"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./scripts/sync-homebrew-tap --cask-file <path> [--tap-repo <owner/name> | --tap-dir <path>] [--cask-token <token>] [--commit-message <message>] [--no-push]
+
+Examples:
+  ./scripts/sync-homebrew-tap --tap-repo aroido/homebrew-tap --cask-file dist/releases/tokenmon.rb
+  ./scripts/sync-homebrew-tap --tap-dir /tmp/homebrew-tap --cask-file dist/releases/tokenmon.rb --no-push
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --tap-repo)
+      shift
+      tap_repo="${1:-}"
+      ;;
+    --tap-dir)
+      shift
+      tap_dir="${1:-}"
+      ;;
+    --cask-file)
+      shift
+      cask_file="${1:-}"
+      ;;
+    --cask-token)
+      shift
+      cask_token="${1:-}"
+      ;;
+    --commit-message)
+      shift
+      commit_message="${1:-}"
+      ;;
+    --no-push)
+      push_changes="no"
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      printf 'Unsupported argument: %s\n' "$1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift || true
+done
+
+[[ -n "$cask_file" ]] || { printf 'Missing --cask-file\n' >&2; usage >&2; exit 1; }
+[[ -f "$cask_file" ]] || { printf 'Missing cask file: %s\n' "$cask_file" >&2; exit 1; }
+
+if [[ -n "$tap_repo" && -n "$tap_dir" ]]; then
+  printf 'Provide either --tap-repo or --tap-dir, not both.\n' >&2
+  exit 1
+fi
+
+if [[ -z "$tap_repo" && -z "$tap_dir" ]]; then
+  printf 'Missing tap destination. Provide --tap-repo or --tap-dir.\n' >&2
+  exit 1
+fi
+
+cleanup_dir=""
+if [[ -n "$tap_repo" ]]; then
+  cleanup_dir="$(mktemp -d -t tokenmon-homebrew-tap.XXXXXX)"
+  trap 'rm -rf "$cleanup_dir"' EXIT
+  if [[ -n "${GH_TOKEN:-}" ]]; then
+    git clone "https://x-access-token:${GH_TOKEN}@github.com/${tap_repo}.git" "$cleanup_dir/repo" >/dev/null
+  else
+    command -v gh >/dev/null 2>&1 || { printf 'gh CLI is required when using --tap-repo without GH_TOKEN\n' >&2; exit 1; }
+    gh repo clone "$tap_repo" "$cleanup_dir/repo" >/dev/null
+  fi
+  tap_dir="$cleanup_dir/repo"
+fi
+
+git -C "$tap_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
+  printf 'Tap destination is not a git repository: %s\n' "$tap_dir" >&2
+  exit 1
+}
+
+target_rel="Casks/${cask_token}.rb"
+target_path="$tap_dir/$target_rel"
+mkdir -p "$(dirname "$target_path")"
+cp "$cask_file" "$target_path"
+
+if [[ -z "$(git -C "$tap_dir" status --short -- "$target_rel")" ]]; then
+  printf 'tap_updated=no\n'
+  printf 'tap_cask_path=%s\n' "$target_path"
+  exit 0
+fi
+
+git -C "$tap_dir" config user.name >/dev/null 2>&1 || git -C "$tap_dir" config user.name "github-actions[bot]"
+git -C "$tap_dir" config user.email >/dev/null 2>&1 || git -C "$tap_dir" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+git -C "$tap_dir" add "$target_rel"
+if [[ -z "$commit_message" ]]; then
+  commit_message="Update ${cask_token} cask"
+fi
+git -C "$tap_dir" commit -m "$commit_message" >/dev/null
+
+if [[ "$push_changes" == "yes" ]]; then
+  git -C "$tap_dir" push >/dev/null
+fi
+
+printf 'tap_updated=yes\n'
+printf 'tap_cask_path=%s\n' "$target_path"
+printf 'tap_pushed=%s\n' "$push_changes"

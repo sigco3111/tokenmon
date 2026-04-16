@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PLIST_TEMPLATE="$ROOT/Packaging/Tokenmon-Info.plist"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./scripts/tokenmon-release-targets repository
+  ./scripts/tokenmon-release-targets configured-feed-url
+  ./scripts/tokenmon-release-targets default-feed-url [owner/name]
+  ./scripts/tokenmon-release-targets github-url [owner/name]
+  ./scripts/tokenmon-release-targets release-download-url [owner/name]
+
+Reads the canonical public release target from Packaging/Tokenmon-Info.plist.
+EOF
+}
+
+read_plist_string() {
+  local key="$1"
+  /usr/libexec/PlistBuddy -c "Print :$key" "$PLIST_TEMPLATE"
+}
+
+resolve_repository() {
+  read_plist_string "TokenmonGitHubRepository"
+}
+
+normalize_repo() {
+  local repo="${1:-}"
+  [[ "$repo" == */* ]] || {
+    printf 'Repository must be in owner/name form: %s\n' "$repo" >&2
+    exit 1
+  }
+  printf '%s\n' "$repo"
+}
+
+default_feed_url_for_repo() {
+  local repo
+  repo="$(normalize_repo "${1:-}")"
+  printf 'https://github.com/%s/releases/latest/download/appcast.xml\n' "$repo"
+}
+
+github_url_for_repo() {
+  local repo
+  repo="$(normalize_repo "${1:-}")"
+  printf 'https://github.com/%s\n' "$repo"
+}
+
+release_download_url_for_repo() {
+  local repo
+  repo="$(normalize_repo "${1:-}")"
+  printf 'https://github.com/%s/releases/download\n' "$repo"
+}
+
+[[ -f "$PLIST_TEMPLATE" ]] || {
+  printf 'Missing Info.plist template: %s\n' "$PLIST_TEMPLATE" >&2
+  exit 1
+}
+
+command="${1:-}"
+repo_arg="${2:-}"
+
+case "$command" in
+  repository)
+    resolve_repository
+    ;;
+  configured-feed-url)
+    read_plist_string "SUFeedURL"
+    ;;
+  default-feed-url)
+    if [[ -z "$repo_arg" ]]; then
+      repo_arg="$(resolve_repository)"
+    fi
+    default_feed_url_for_repo "$repo_arg"
+    ;;
+  github-url)
+    if [[ -z "$repo_arg" ]]; then
+      repo_arg="$(resolve_repository)"
+    fi
+    github_url_for_repo "$repo_arg"
+    ;;
+  release-download-url)
+    if [[ -z "$repo_arg" ]]; then
+      repo_arg="$(resolve_repository)"
+    fi
+    release_download_url_for_repo "$repo_arg"
+    ;;
+  -h|--help)
+    usage
+    ;;
+  *)
+    printf 'Unsupported command: %s\n' "$command" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

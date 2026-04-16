@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+mode="full"
+scratch_path="${TOKENMON_DEV_VERIFY_SCRATCH_PATH:-}"
+test_filter=""
+smoke_db_path=""
+smoke_tmp_dir=""
+timing_report="${TOKENMON_TIMING_REPORT:-}"
+
+timing_now() {
+  python3 - <<'PY'
+import time
+print(f"{time.time():.6f}")
+PY
+}
+
+record_timing() {
+  local category="$1"
+  local step="$2"
+  local started_at="$3"
+  local ended_at
+  local duration
+
+  ended_at="$(timing_now)"
+  duration="$(python3 - "$started_at" "$ended_at" <<'PY'
+import sys
+start = float(sys.argv[1])
+end = float(sys.argv[2])
+print(f"{end - start:.3f}")
+PY
+)"
+
+  printf 'TIMING: category=%s step=%s duration_seconds=%s\n' "$category" "$step" "$duration"
+  if [[ -n "$timing_report" ]]; then
+    printf 'category=%s step=%s duration_seconds=%s\n' "$category" "$step" "$duration" >>"$timing_report"
+  fi
+}
+
+swift_cmd() {
+  local action="$1"
+  shift
+  local developer_dir="${DEVELOPER_DIR:-}"
+  if [[ -z "$developer_dir" && -n "${MD_APPLE_SDK_ROOT:-}" ]]; then
+    developer_dir="${MD_APPLE_SDK_ROOT}/Contents/Developer"
+  fi
+  if [[ -n "$developer_dir" && ! -d "$developer_dir" ]]; then
+    developer_dir=""
+  fi
+  if [[ "$(uname -s)" == "Darwin" ]] && command -v xcrun >/dev/null 2>&1; then
+    if [[ -n "$developer_dir" ]]; then
+      if [[ -n "$scratch_path" ]]; then
+        DEVELOPER_DIR="$developer_dir" xcrun swift "$action" --scratch-path "$scratch_path" "$@"
+      else
+        DEVELOPER_DIR="$developer_dir" xcrun swift "$action" "$@"
+      fi
+    else
+      if [[ -n "$scratch_path" ]]; then
+        xcrun swift "$action" --scratch-path "$scratch_path" "$@"
+      else
+        xcrun swift "$action" "$@"
+      fi
+    fi
+    return
+  fi
+  if [[ -n "$scratch_path" ]]; then
+    swift "$action" --scratch-path "$scratch_path" "$@"
+  else
+    swift "$action" "$@"
+  fi
+}
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./scripts/ai-verify --mode quick [--test-filter <filter>] [--scratch-path <path>]
+  ./scripts/ai-verify --mode smoke [--test-filter <filter>] [--scratch-path <path>] [--db <path>]
+  ./scripts/ai-verify --mode pr [--scratch-path <path>]
+  ./scripts/ai-verify --mode main [--scratch-path <path>]
+  ./scripts/ai-verify --mode nightly [--scratch-path <path>]
+  ./scripts/ai-verify --mode full [--scratch-path <path>]
+
+Modes:
+  quick    Incremental debug build and optional targeted Swift tests.
+  smoke    quick lane plus TokenmonApp --smoke-test against a temporary DB.
+  pr       Fast PR verification; delegates to the lightweight ./scripts/run-ai-verify lane.
+  main     Deeper main-branch verification; includes release-tooling dry runs.
+  nightly  Deepest verification; includes release-tooling dry runs and README PNG/GIF media generation.
+  full     Developer completion gate; delegates to the lightweight ./scripts/run-ai-verify lane.
+EOF
+}
+
+run_targeted_tests_if_requested() {
+  if [[ -z "$test_filter" ]]; then
+    return
+  fi
+
+  local started_at
+  started_at="$(timing_now)"
+  swift_cmd test --filter "$test_filter" >/dev/null
+  record_timing "build" "swift_test_filter" "$started_at"
+  printf 'VERIFY PASS: swift test --filter %s\n' "$test_filter"
+}
+
+run_quick_lane() {
+  local started_at
+  started_at="$(timing_now)"
+  swift_cmd build >/dev/null
+  record_timing "build" "swift_build_quick" "$started_at"
+  printf 'VERIFY PASS: swift build (quick)\n'
+  run_targeted_tests_if_requested
+}
+
+run_smoke_lane() {
+  local db_path="$smoke_db_path"
+
+  if [[ -z "$db_path" ]]; then
+    smoke_tmp_dir="$(mktemp -d)"
+    trap 'if [[ -n "${smoke_tmp_dir:-}" ]]; then rm -rf "$smoke_tmp_dir"; fi' EXIT
+    db_path="$smoke_tmp_dir/tokenmon.sqlite"
+  fi
+
+  local bin_path
+  local started_at
+  started_at="$(timing_now)"
+  bin_path="$(swift_cmd build --show-bin-path)/TokenmonApp"
+  [[ -x "$bin_path" ]] || { printf 'Missing app binary: %s\n' "$bin_path" >&2; exit 1; }
+  "$bin_path" --smoke-test --db "$db_path" >/dev/null
+  record_timing "smoke" "tokenmon_app_smoke" "$started_at"
+  printf 'VERIFY PASS: TokenmonApp --smoke-test\n'
+}
+
+delegated_scratch_path() {
+  local lane="$1"
+  if [[ -n "$scratch_path" ]]; then
+    printf '%s\n' "$scratch_path"
+    return
+  fi
+
+  case "$lane" in
+    pr|main|nightly)
+      printf '%s/.build/verify-%s\n' "$ROOT" "$lane"
+      ;;
+    *)
+      printf '%s\n' ""
+      ;;
+  esac
+}
+
+delegate_to_run_ai_verify() {
+  local lane="$1"
+  shift
+
+  local delegated_scratch
+  delegated_scratch="$(delegated_scratch_path "$lane")"
+  if [[ -n "$delegated_scratch" ]]; then
+    TOKENMON_VERIFY_SCRATCH_PATH="$delegated_scratch" \
+    TOKENMON_TIMING_REPORT="$timing_report" \
+    exec "$ROOT/scripts/run-ai-verify" "$@"
+  fi
+
+  TOKENMON_TIMING_REPORT="$timing_report" \
+  exec "$ROOT/scripts/run-ai-verify" "$@"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --mode)
+      shift
+      mode="${1:-}"
+      ;;
+    --test-filter)
+      shift
+      test_filter="${1:-}"
+      ;;
+    --scratch-path)
+      shift
+      scratch_path="${1:-}"
+      ;;
+    --db)
+      shift
+      smoke_db_path="${1:-}"
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      printf 'Unsupported argument: %s\n' "$1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift || true
+done
+
+case "$mode" in
+  quick)
+    run_quick_lane
+    ;;
+  smoke)
+    run_quick_lane
+    run_smoke_lane
+    ;;
+  pr)
+    if [[ -n "$test_filter" || -n "$smoke_db_path" ]]; then
+      printf 'The pr lane does not accept targeted quick-lane options.\n' >&2
+      exit 2
+    fi
+    delegate_to_run_ai_verify "pr"
+    ;;
+  main)
+    if [[ -n "$test_filter" || -n "$smoke_db_path" ]]; then
+      printf 'The main lane does not accept targeted quick-lane options.\n' >&2
+      exit 2
+    fi
+    delegate_to_run_ai_verify "main" --include-release-tooling
+    ;;
+  nightly)
+    if [[ -n "$test_filter" || -n "$smoke_db_path" ]]; then
+      printf 'The nightly lane does not accept targeted quick-lane options.\n' >&2
+      exit 2
+    fi
+    delegate_to_run_ai_verify "nightly" --include-release-tooling --include-readme-screenshots
+    ;;
+  full)
+    if [[ -n "$test_filter" || -n "$smoke_db_path" ]]; then
+      printf 'The full lane does not accept targeted quick-lane options.\n' >&2
+      exit 2
+    fi
+    delegate_to_run_ai_verify "full"
+    ;;
+  *)
+    printf 'Unsupported mode: %s\n' "$mode" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

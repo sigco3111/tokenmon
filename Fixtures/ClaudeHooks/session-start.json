@@ -1,0 +1,10 @@
+{
+  "session_id": "claude_hook_fixture",
+  "transcript_path": "/tmp/claude-hook-fixture.jsonl",
+  "cwd": "/tmp/tokenmon-fixture",
+  "hook_event_name": "SessionStart",
+  "model": {
+    "id": "claude-opus-4-1",
+    "display_name": "Opus"
+  }
+}

@@ -1,0 +1,405 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+output_dir="$ROOT/assets/screenshots"
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+allow_menu_bar_skip=0
+installed_app_path="$HOME/Applications/Tokenmon.app"
+installed_app_bin="$installed_app_path/Contents/MacOS/TokenmonApp"
+local_app_bin=""
+capture_app_bundle="${TOKENMON_CAPTURE_APP_BUNDLE:-}"
+selected_languages=("english" "korean")
+selected_appearances=("dark" "light")
+canonical_language="english"
+canonical_appearance="dark"
+
+screenshot_assets=(
+  "menu-hero.gif"
+  "menu-overview.png"
+  "now-tab.png"
+  "tokens-tab.png"
+  "stats-tab.png"
+  "seen-dex.png"
+  "settings.png"
+)
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./scripts/capture-readme-screenshots [--output-dir <path>] [--allow-menu-bar-skip]
+                                       [--language all|english|korean]
+                                       [--appearance all|dark|light]
+EOF
+}
+
+value_in_list() {
+  local needle="$1"
+  shift
+  local item
+  for item in "$@"; do
+    if [[ "$item" == "$needle" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+parse_language_selection() {
+  local raw="$1"
+  case "$raw" in
+    all)
+      selected_languages=("english" "korean")
+      ;;
+    english|korean)
+      selected_languages=("$raw")
+      ;;
+    *)
+      printf 'Unsupported language selection: %s\n' "$raw" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+}
+
+parse_appearance_selection() {
+  local raw="$1"
+  case "$raw" in
+    all)
+      selected_appearances=("dark" "light")
+      ;;
+    dark|light)
+      selected_appearances=("$raw")
+      ;;
+    *)
+      printf 'Unsupported appearance selection: %s\n' "$raw" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --output-dir)
+      shift
+      output_dir="${1:-}"
+      ;;
+    --allow-menu-bar-skip)
+      allow_menu_bar_skip=1
+      ;;
+    --language)
+      shift
+      parse_language_selection "${1:-}"
+      ;;
+    --appearance)
+      shift
+      parse_appearance_selection "${1:-}"
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      printf 'Unsupported argument: %s\n' "$1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift || true
+done
+
+base_db="$tmpdir/readme-demo-base.sqlite"
+demo_inbox="$tmpdir/readme-demo.ndjson"
+variant_root="$output_dir/variants"
+
+mkdir -p "$output_dir" "$variant_root"
+
+ensure_installed_app_bin() {
+  mkdir -p "$HOME/Applications"
+  if [[ -n "$capture_app_bundle" ]]; then
+    if [[ ! -d "$capture_app_bundle" ]]; then
+      printf 'TOKENMON_CAPTURE_APP_BUNDLE does not exist: %s\n' "$capture_app_bundle" >&2
+      exit 1
+    fi
+  else
+    "$ROOT/scripts/build-release" --output "$ROOT/.build/release-install-dev" --include-developer-tools >/dev/null
+    capture_app_bundle="$ROOT/.build/release-install-dev/Tokenmon.app"
+  fi
+  pkill -x TokenmonApp >/dev/null 2>&1 || true
+  rm -rf "$installed_app_path"
+  ditto "$capture_app_bundle" "$installed_app_path"
+  xattr -dr com.apple.provenance "$installed_app_path" >/dev/null 2>&1 || true
+  xattr -dr com.apple.quarantine "$installed_app_path" >/dev/null 2>&1 || true
+}
+
+ensure_local_app_bin() {
+  if [[ -n "$local_app_bin" ]]; then
+    return
+  fi
+  swift build >/dev/null
+  local_app_bin="$(swift build --show-bin-path)/TokenmonApp"
+}
+
+setup_tokenmon_cmd() {
+  ensure_local_app_bin
+  "$local_app_bin" "$@"
+}
+
+capture_tokenmon_cmd() {
+  "$installed_app_bin" "$@"
+}
+
+copy_screenshot_assets() {
+  local source_dir="$1"
+  local destination_dir="$2"
+  local asset
+  mkdir -p "$destination_dir"
+  for asset in "${screenshot_assets[@]}"; do
+    cp "$source_dir/$asset" "$destination_dir/$asset"
+  done
+}
+
+parse_capture_field() {
+  local output="$1"
+  local key="$2"
+  printf '%s\n' "$output" | awk -F': ' -v prefix="$key" '$1 == prefix { sub(/^[^:]*: /, "", $0); print $0; exit }'
+}
+
+apply_variant_settings() {
+  local db_path="$1"
+  local appearance="$2"
+  local language="$3"
+  sqlite3 "$db_path" <<SQL
+INSERT INTO settings (setting_key, setting_value_json, updated_at)
+VALUES
+  ('appearance_preference', '"$appearance"', '$demo_started_at'),
+  ('language_preference', '"$language"', '$demo_started_at')
+ON CONFLICT(setting_key) DO UPDATE SET
+  setting_value_json = excluded.setting_value_json,
+  updated_at = excluded.updated_at;
+SQL
+}
+
+ensure_installed_app_bin
+
+setup_tokenmon_cmd --tokenmon-db-init --db "$base_db" >/dev/null
+setup_tokenmon_cmd --tokenmon-seed-species --db "$base_db" >/dev/null
+
+demo_started_at="$(python3 - <<'PY'
+from datetime import datetime, timedelta, timezone
+now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+print((now - timedelta(hours=18)).isoformat().replace("+00:00", "Z"))
+PY
+)"
+
+python3 - <<'PY' > "$demo_inbox"
+import json
+from datetime import datetime, timedelta, timezone
+
+now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+providers = [
+    ("codex", "codex_exec_json", "codex_readme_main", "gpt-5.4"),
+    ("claude", "claude_statusline", "claude_readme_main", "claude-sonnet-4"),
+    ("gemini", "gemini_cli", "gemini_readme_main", "gemini-2.5-pro"),
+]
+events = []
+for index in range(18):
+    provider, source_mode, session_id, model_slug = providers[index % len(providers)]
+    observed_at = (now - timedelta(hours=17 - index)).isoformat().replace("+00:00", "Z")
+    multiplier = index + 1
+    total_input = 900_000 * multiplier
+    total_output = 280_000 * multiplier
+    total_cached = 120_000 * multiplier
+    if provider == "claude":
+        total_input += 350_000
+    elif provider == "gemini":
+        total_output += 180_000
+
+    events.append({
+        "event_type": "provider_usage_sample",
+        "provider": provider,
+        "source_mode": source_mode,
+        "provider_session_id": session_id,
+        "observed_at": observed_at,
+        "workspace_dir": "/tmp/tokenmon-readme-demo",
+        "model_slug": model_slug,
+        "transcript_path": None,
+        "total_input_tokens": total_input,
+        "total_output_tokens": total_output,
+        "total_cached_input_tokens": total_cached,
+        "normalized_total_tokens": total_input + total_output + total_cached,
+        "provider_event_fingerprint": f"{provider}:{session_id}:turn_{multiplier:03d}",
+        "raw_reference": {
+            "kind": "jsonl",
+            "offset": str(multiplier),
+            "event_name": "turn.completed"
+        }
+    })
+
+for event in events:
+    print(json.dumps(event, separators=(",", ":")))
+PY
+
+setup_tokenmon_cmd --tokenmon-ingest-inbox "$demo_inbox" --db "$base_db" >/dev/null
+
+sqlite3 "$base_db" <<SQL
+INSERT INTO settings (setting_key, setting_value_json, updated_at)
+VALUES
+  ('gameplay_started_at', '\"$demo_started_at\"', '$demo_started_at'),
+  ('live_gameplay_started_at', '\"$demo_started_at\"', '$demo_started_at'),
+  ('usage_analytics_prompt_dismissed', 'true', '$demo_started_at'),
+  ('usage_analytics_enabled', 'false', '$demo_started_at'),
+  ('notifications_enabled', 'true', '$demo_started_at'),
+  ('provider_status_visibility', 'true', '$demo_started_at'),
+  ('field_backplate_enabled', 'true', '$demo_started_at')
+ON CONFLICT(setting_key) DO UPDATE SET
+  setting_value_json = excluded.setting_value_json,
+  updated_at = excluded.updated_at;
+SQL
+
+sqlite3 "$base_db" <<'SQL'
+UPDATE usage_samples
+SET gameplay_eligibility = 'eligible_live',
+    gameplay_delta_tokens = normalized_delta_tokens;
+
+UPDATE exploration_state
+SET total_normalized_tokens = COALESCE((SELECT SUM(normalized_delta_tokens) FROM usage_samples), 0),
+    tokens_since_last_encounter = 2000000,
+    next_encounter_threshold_tokens = 6400000,
+    last_usage_sample_id = (SELECT MAX(usage_sample_id) FROM usage_samples),
+    updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+WHERE exploration_state_id = 1;
+SQL
+
+demo_index=0
+fields=(grassland coast sky ice grassland coast sky ice)
+rarities=(common uncommon rare common epic uncommon legendary common)
+outcomes=(captured captured escaped captured captured escaped captured captured)
+while (( demo_index < ${#fields[@]} )); do
+  field_code="${fields[$demo_index]}"
+  rarity_tier="${rarities[$demo_index]}"
+  outcome="${outcomes[$demo_index]:-captured}"
+  species_id="$(sqlite3 "$base_db" "SELECT species_id FROM species WHERE is_active = 1 AND field_code = '$field_code' AND rarity_tier = '$rarity_tier' ORDER BY sort_order ASC LIMIT 1;")"
+  if [[ -z "$species_id" ]]; then
+    species_id="$(sqlite3 "$base_db" "SELECT species_id FROM species WHERE is_active = 1 AND field_code = '$field_code' ORDER BY sort_order ASC LIMIT 1;")"
+  fi
+  occurred_at="$(python3 - "$demo_index" <<'PY'
+from datetime import datetime, timedelta, timezone
+import sys
+now = datetime.now(timezone.utc).replace(minute=20, second=0, microsecond=0)
+index = int(sys.argv[1])
+print((now - timedelta(days=(7 - index) if index < 7 else 0, hours=max(0, 5 - index))).isoformat().replace("+00:00", "Z"))
+PY
+)"
+  provider="codex"
+  if (( demo_index % 3 == 1 )); then
+    provider="claude"
+  elif (( demo_index % 3 == 2 )); then
+    provider="gemini"
+  fi
+  setup_tokenmon_cmd \
+    --tokenmon-forge-encounter \
+    --db "$base_db" \
+    --provider "$provider" \
+    --field "$field_code" \
+    --rarity "$rarity_tier" \
+    --species-id "$species_id" \
+    --outcome "$outcome" \
+    --occurred-at "$occurred_at" >/dev/null
+  demo_index=$((demo_index + 1))
+done
+
+variant_combos=()
+language_index=0
+while (( language_index < ${#selected_languages[@]} )); do
+  appearance_index=0
+  while (( appearance_index < ${#selected_appearances[@]} )); do
+    variant_combos+=("${selected_languages[$language_index]}:${selected_appearances[$appearance_index]}")
+    appearance_index=$((appearance_index + 1))
+  done
+  language_index=$((language_index + 1))
+done
+
+if (( ${#variant_combos[@]} == 0 )); then
+  printf 'No screenshot variants selected.\n' >&2
+  exit 1
+fi
+
+selected_canonical_combo="${variant_combos[0]}"
+canonical_combo="${canonical_language}:${canonical_appearance}"
+if value_in_list "$canonical_combo" "${variant_combos[@]}"; then
+  selected_canonical_combo="$canonical_combo"
+fi
+
+canonical_render_output=""
+
+combo_index=0
+while (( combo_index < ${#variant_combos[@]} )); do
+  combo="${variant_combos[$combo_index]}"
+  language="${combo%%:*}"
+  appearance="${combo##*:}"
+  variant_db="$tmpdir/readme-demo-${language}-${appearance}.sqlite"
+  variant_capture_dir="$tmpdir/readme-capture-${language}-${appearance}"
+  final_variant_dir="$variant_root/$language/$appearance"
+
+  cp "$base_db" "$variant_db"
+  apply_variant_settings "$variant_db" "$appearance" "$language"
+  mkdir -p "$variant_capture_dir" "$final_variant_dir"
+
+  cmd=(--capture-readme-media --db "$variant_db" --out-dir "$variant_capture_dir")
+  if [[ "$allow_menu_bar_skip" == "1" ]]; then
+    cmd+=(--allow-menu-bar-skip)
+  fi
+
+  variant_render_output="$(capture_tokenmon_cmd "${cmd[@]}")"
+  copy_screenshot_assets "$variant_capture_dir" "$final_variant_dir"
+  printf 'variant_capture=%s/%s\n' "$language" "$appearance"
+  printf 'variant_output=%s\n' "$final_variant_dir"
+
+  if [[ "$combo" == "$selected_canonical_combo" ]]; then
+    canonical_render_output="$variant_render_output"
+  fi
+
+  combo_index=$((combo_index + 1))
+done
+
+canonical_language_selected="${selected_canonical_combo%%:*}"
+canonical_appearance_selected="${selected_canonical_combo##*:}"
+canonical_variant_dir="$variant_root/$canonical_language_selected/$canonical_appearance_selected"
+copy_screenshot_assets "$canonical_variant_dir" "$output_dir"
+
+canonical_popover_capture_mode="$(parse_capture_field "$canonical_render_output" "popover_capture_mode")"
+canonical_dex_capture_mode="$(parse_capture_field "$canonical_render_output" "dex_capture_mode")"
+canonical_settings_capture_mode="$(parse_capture_field "$canonical_render_output" "settings_capture_mode")"
+canonical_menu_bar_capture_mode="$(parse_capture_field "$canonical_render_output" "menu_bar_capture_mode")"
+canonical_menu_bar_capture_status="$(parse_capture_field "$canonical_render_output" "menu_bar_capture_status")"
+canonical_menu_bar_capture_reason="$(parse_capture_field "$canonical_render_output" "menu_bar_capture_reason")"
+
+printf 'canonical_variant=%s/%s\n' "$canonical_language_selected" "$canonical_appearance_selected"
+printf 'variant_screenshots_root=%s\n' "$variant_root"
+printf 'popover_capture_mode: %s\n' "${canonical_popover_capture_mode:-unknown}"
+printf 'dex_capture_mode: %s\n' "${canonical_dex_capture_mode:-unknown}"
+printf 'settings_capture_mode: %s\n' "${canonical_settings_capture_mode:-unknown}"
+printf 'menu_overview: %s\n' "$output_dir/menu-overview.png"
+printf 'now_tab: %s\n' "$output_dir/now-tab.png"
+printf 'tokens_tab: %s\n' "$output_dir/tokens-tab.png"
+printf 'stats_tab: %s\n' "$output_dir/stats-tab.png"
+printf 'seen_dex: %s\n' "$output_dir/seen-dex.png"
+printf 'settings: %s\n' "$output_dir/settings.png"
+if [[ -n "$canonical_menu_bar_capture_mode" ]]; then
+  printf 'menu_bar_capture_mode: %s\n' "$canonical_menu_bar_capture_mode"
+fi
+if [[ -n "$canonical_menu_bar_capture_status" ]]; then
+  printf 'menu_bar_capture_status: %s\n' "$canonical_menu_bar_capture_status"
+fi
+if [[ "$canonical_menu_bar_capture_status" == "captured" ]]; then
+  printf 'hero_gif: %s\n' "$output_dir/menu-hero.gif"
+elif [[ -n "$canonical_menu_bar_capture_reason" ]]; then
+  printf 'menu_bar_capture_reason: %s\n' "$canonical_menu_bar_capture_reason"
+fi
+printf 'screenshots_output=%s\n' "$output_dir"
+find "$output_dir" -maxdepth 4 -type f | sort
