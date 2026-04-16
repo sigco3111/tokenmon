@@ -40,6 +40,7 @@ final class TokenmonMenuModel: ObservableObject {
     private let executablePath: String
     private let providerInspector: TokenmonProviderInspector
     private let launchAtLoginStateProvider: @Sendable () -> TokenmonLaunchAtLoginState
+    private let loginItemsSettingsOpener: @Sendable () -> Void
     private let notificationSettingsOpener: @Sendable () -> TokenmonNotificationSettingsOpenResult
     private let notificationCoordinator: TokenmonCaptureNotificationCoordinating
     private let analyticsTracker: TokenmonAnalyticsTracking
@@ -57,6 +58,9 @@ final class TokenmonMenuModel: ObservableObject {
         databasePath: String = TokenmonDatabaseManager.defaultPath(),
         providerInspector: @escaping TokenmonProviderInspector = TokenmonProviderOnboarding.inspectAll,
         launchAtLoginStateProvider: @escaping @Sendable () -> TokenmonLaunchAtLoginState = TokenmonLaunchAtLoginController.snapshot,
+        loginItemsSettingsOpener: @escaping @Sendable () -> Void = {
+            SMAppService.openSystemSettingsLoginItems()
+        },
         notificationSettingsOpener: @escaping @Sendable () -> TokenmonNotificationSettingsOpenResult = {
             TokenmonSystemSettingsOpener.openNotificationSettings()
         },
@@ -69,6 +73,7 @@ final class TokenmonMenuModel: ObservableObject {
         inboxMonitor = TokenmonInboxMonitor(databasePath: databasePath)
         self.providerInspector = providerInspector
         self.launchAtLoginStateProvider = launchAtLoginStateProvider
+        self.loginItemsSettingsOpener = loginItemsSettingsOpener
         self.notificationSettingsOpener = notificationSettingsOpener
         self.notificationCoordinator = notificationCoordinator
         self.analyticsTracker = analyticsTracker
@@ -425,6 +430,16 @@ final class TokenmonMenuModel: ObservableObject {
             settingsMessage = nil
         }
         refreshNotificationAuthorizationState()
+    }
+
+    func openLoginItemsSettings() {
+        loginItemsSettingsOpener()
+        logInfo(category: "settings", event: "opened_login_items_settings")
+        settingsMessage = TokenmonL10n.string("settings.feedback.opened_login_items_settings")
+        settingsError = nil
+        updateDiagnosticsSnapshot { snapshot in
+            snapshot.launchAtLoginState = TokenmonLaunchAtLoginController.snapshot()
+        }
     }
 
     func updateProviderStatusVisibility(_ value: Bool) {
@@ -1463,9 +1478,27 @@ struct TokenmonLaunchAtLoginState: Equatable, Sendable {
     let isSupported: Bool
     let isEnabled: Bool
     let reason: String
+    let showsOpenSystemSettingsAction: Bool
 
     static func unsupported(reason: String) -> TokenmonLaunchAtLoginState {
-        TokenmonLaunchAtLoginState(isSupported: false, isEnabled: false, reason: reason)
+        TokenmonLaunchAtLoginState(
+            isSupported: false,
+            isEnabled: false,
+            reason: reason,
+            showsOpenSystemSettingsAction: false
+        )
+    }
+
+    init(
+        isSupported: Bool,
+        isEnabled: Bool,
+        reason: String,
+        showsOpenSystemSettingsAction: Bool = false
+    ) {
+        self.isSupported = isSupported
+        self.isEnabled = isEnabled
+        self.reason = reason
+        self.showsOpenSystemSettingsAction = showsOpenSystemSettingsAction
     }
 }
 
@@ -1587,7 +1620,8 @@ enum TokenmonLaunchAtLoginController {
             return TokenmonLaunchAtLoginState(
                 isSupported: true,
                 isEnabled: false,
-                reason: TokenmonL10n.string("settings.launch_at_login.reason.requires_approval")
+                reason: TokenmonL10n.string("settings.launch_at_login.reason.requires_approval"),
+                showsOpenSystemSettingsAction: true
             )
         case .notRegistered:
             return TokenmonLaunchAtLoginState(
@@ -1619,8 +1653,11 @@ enum TokenmonLaunchAtLoginController {
                 event: "launch_at_login_native_path_unsupported",
                 metadata: ["status": nativeStatus.logLabel]
             )
-            return .unsupported(
-                reason: TokenmonL10n.string("settings.launch_at_login.reason.status_unavailable")
+            return TokenmonLaunchAtLoginState(
+                isSupported: false,
+                isEnabled: false,
+                reason: TokenmonL10n.string("settings.launch_at_login.reason.status_unavailable"),
+                showsOpenSystemSettingsAction: true
             )
         }
     }

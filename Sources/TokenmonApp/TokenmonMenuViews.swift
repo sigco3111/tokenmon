@@ -822,6 +822,7 @@ struct TokenmonSettingsPanel: View {
                     settingsMessage: model.settingsMessage,
                     settingsError: model.settingsError,
                     onSetLaunchAtLogin: model.setLaunchAtLogin,
+                    onOpenLoginItemsSettings: model.openLoginItemsSettings,
                     onUpdateAppearancePreference: model.updateAppearancePreference,
                     onUpdateLanguagePreference: model.updateLanguagePreference,
                     onUpdateProviderStatusVisibility: model.updateProviderStatusVisibility,
@@ -977,6 +978,7 @@ struct TokenmonGeneralSettingsPane: View {
     let settingsMessage: String?
     let settingsError: String?
     let onSetLaunchAtLogin: (Bool) -> Void
+    let onOpenLoginItemsSettings: () -> Void
     let onUpdateAppearancePreference: (AppAppearancePreference) -> Void
     let onUpdateLanguagePreference: (AppLanguagePreference) -> Void
     let onUpdateProviderStatusVisibility: (Bool) -> Void
@@ -1019,6 +1021,13 @@ struct TokenmonGeneralSettingsPane: View {
                             systemImage: launchStatusSymbol,
                             tint: launchStatusTint
                         )
+
+                        if launchAtLoginState.showsOpenSystemSettingsAction {
+                            Button(TokenmonL10n.string("settings.general.open_login_items_settings")) {
+                                onOpenLoginItemsSettings()
+                            }
+                            .buttonStyle(.glass)
+                        }
                     }
                 }
 
