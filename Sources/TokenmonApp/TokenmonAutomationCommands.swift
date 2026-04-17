@@ -41,6 +41,15 @@ enum TokenmonAutomationCommand {
         if arguments.contains("--tokenmon-localization-diagnose") {
             return try runLocalizationDiagnoseCommand(arguments: arguments)
         }
+        if arguments.contains("--tokenmon-launch-at-login-status") {
+            return try runLaunchAtLoginStatusCommand(arguments: arguments)
+        }
+        if let mode = optionValue("--tokenmon-launch-at-login-set", in: arguments) {
+            return try runLaunchAtLoginSetCommand(mode: mode, arguments: arguments)
+        }
+        if let mode = optionValue("--tokenmon-launch-at-login-force-native-set", in: arguments) {
+            return try runLaunchAtLoginForceNativeSetCommand(mode: mode, arguments: arguments)
+        }
         if arguments.contains("--tokenmon-updater-status") {
             return try runUpdaterStatusCommand(arguments: arguments)
         }
@@ -326,6 +335,117 @@ enum TokenmonAutomationCommand {
         }
 
         return lines.joined(separator: "\n")
+    }
+
+    private static func runLaunchAtLoginStatusCommand(arguments: [String]) throws -> String {
+        _ = arguments
+        let state = TokenmonLaunchAtLoginController.snapshot()
+        return renderLaunchAtLoginState(state, header: "launch_at_login_status")
+    }
+
+    private static func runLaunchAtLoginSetCommand(mode: String, arguments: [String]) throws -> String {
+        _ = arguments
+        let normalizedMode = mode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let desiredValue: Bool
+        switch normalizedMode {
+        case "true", "on", "enable", "enabled", "1":
+            desiredValue = true
+        case "false", "off", "disable", "disabled", "0":
+            desiredValue = false
+        default:
+            throw AutomationError.invalidUsage("expected `--tokenmon-launch-at-login-set <on|off>`")
+        }
+
+        do {
+            let state = try TokenmonLaunchAtLoginController.setEnabled(desiredValue)
+            return renderLaunchAtLoginState(
+                state,
+                header: "launch_at_login_set",
+                extraLines: ["requested: \(desiredValue ? "on" : "off")"]
+            )
+        } catch {
+            let nsError = error as NSError
+            var lines = [
+                "launch_at_login_set",
+                "requested: \(desiredValue ? "on" : "off")",
+                "result: error",
+                "error_domain: \(nsError.domain)",
+                "error_code: \(nsError.code)",
+                "error_description: \(nsError.localizedDescription)",
+            ]
+            if let failureReason = nsError.localizedFailureReason {
+                lines.append("failure_reason: \(failureReason)")
+            }
+            let fallbackState = TokenmonLaunchAtLoginController.snapshot()
+            lines.append(contentsOf: renderLaunchAtLoginStateLines(fallbackState))
+            return lines.joined(separator: "\n")
+        }
+    }
+
+    private static func runLaunchAtLoginForceNativeSetCommand(mode: String, arguments: [String]) throws -> String {
+        _ = arguments
+        let normalizedMode = mode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let desiredValue: Bool
+        switch normalizedMode {
+        case "true", "on", "enable", "enabled", "1":
+            desiredValue = true
+        case "false", "off", "disable", "disabled", "0":
+            desiredValue = false
+        default:
+            throw AutomationError.invalidUsage("expected `--tokenmon-launch-at-login-force-native-set <on|off>`")
+        }
+
+        let dependencies = TokenmonLaunchAtLoginDependencies.live()
+        do {
+            try dependencies.nativeSetter(desiredValue)
+            let state = TokenmonLaunchAtLoginController.snapshot(using: dependencies)
+            return renderLaunchAtLoginState(
+                state,
+                header: "launch_at_login_force_native_set",
+                extraLines: [
+                    "requested: \(desiredValue ? "on" : "off")",
+                    "result: success",
+                ]
+            )
+        } catch {
+            let nsError = error as NSError
+            let state = TokenmonLaunchAtLoginController.snapshot(using: dependencies)
+            var lines = [
+                "launch_at_login_force_native_set",
+                "requested: \(desiredValue ? "on" : "off")",
+                "result: error",
+                "error_domain: \(nsError.domain)",
+                "error_code: \(nsError.code)",
+                "error_description: \(nsError.localizedDescription)",
+            ]
+            if let failureReason = nsError.localizedFailureReason {
+                lines.append("failure_reason: \(failureReason)")
+            }
+            lines.append(contentsOf: renderLaunchAtLoginStateLines(state))
+            return lines.joined(separator: "\n")
+        }
+    }
+
+    private static func renderLaunchAtLoginState(
+        _ state: TokenmonLaunchAtLoginState,
+        header: String,
+        extraLines: [String] = []
+    ) -> String {
+        var lines = [header]
+        lines.append(contentsOf: extraLines)
+        lines.append(contentsOf: renderLaunchAtLoginStateLines(state))
+        return lines.joined(separator: "\n")
+    }
+
+    private static func renderLaunchAtLoginStateLines(
+        _ state: TokenmonLaunchAtLoginState
+    ) -> [String] {
+        [
+            "is_supported: \(state.isSupported ? "yes" : "no")",
+            "is_enabled: \(state.isEnabled ? "yes" : "no")",
+            "shows_open_system_settings_action: \(state.showsOpenSystemSettingsAction ? "yes" : "no")",
+            "reason: \(state.reason)",
+        ]
     }
 
     private static func runUpdaterStatusCommand(arguments: [String]) throws -> String {

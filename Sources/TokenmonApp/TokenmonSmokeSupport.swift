@@ -721,7 +721,13 @@ enum TokenmonReadmeScreenshotRenderer {
         )
         model.revealSettingsPane(.general)
         try captureHostedWindowRootView(
-            AnyView(TokenmonSettingsPanel(model: model, appUpdater: appUpdater)),
+            AnyView(
+                TokenmonSettingsPanel(
+                    model: model,
+                    appUpdater: appUpdater,
+                    onOpenWelcomeGuide: {}
+                )
+            ),
             size: NSSize(width: 760, height: 760),
             captureWholeWindow: true,
             to: settingsURL
@@ -1375,8 +1381,10 @@ private struct TokenmonSettingsScreenshotShell: View {
                 onUpdateProviderStatusVisibility: { _ in },
                 onUpdateFieldBackplateEnabled: { _ in },
                 onUpdateNotificationsEnabled: { _ in },
+                onRequestNotificationPermission: {},
                 onUpdateUsageAnalyticsEnabled: { _ in },
-                onOpenSystemNotificationSettings: {}
+                onOpenSystemNotificationSettings: {},
+                onOpenWelcomeGuide: {}
             )
             .frame(maxWidth: 584, maxHeight: .infinity, alignment: .topLeading)
         }

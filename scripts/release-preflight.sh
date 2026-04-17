@@ -54,6 +54,8 @@ fi
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+. "$ROOT_DIR/scripts/load-local-release-env.sh" "$ROOT_DIR"
+
 VERSION="${TAG#v}"
 PLIST="Packaging/Tokenmon-Info.plist"
 

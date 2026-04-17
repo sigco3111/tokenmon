@@ -30,7 +30,10 @@ struct TokenmonAppMain: App {
         Settings {
             TokenmonSettingsPanel(
                 model: TokenmonAppController.shared.menuModel,
-                appUpdater: TokenmonAppController.shared.appUpdater
+                appUpdater: TokenmonAppController.shared.appUpdater,
+                onOpenWelcomeGuide: {
+                    TokenmonAppController.shared.showOnboardingWindow(entrypoint: "settings_scene")
+                }
             )
         }
         .defaultSize(width: 760, height: 560)

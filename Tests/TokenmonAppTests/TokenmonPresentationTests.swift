@@ -2411,6 +2411,44 @@ struct TokenmonPresentationTests {
     }
 
     @Test
+    func installedAppBundleSupportAcceptsApplicationsLocations() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let fakeHome = directory.appendingPathComponent("fake-home", isDirectory: true)
+        try FileManager.default.createDirectory(at: fakeHome, withIntermediateDirectories: true)
+        let bundle = try makeFakeAppBundle(
+            appURL: fakeHome.appendingPathComponent("Applications/Tokenmon.app", isDirectory: true)
+        )
+
+        #expect(
+            TokenmonInstalledAppBundleSupport.isInstalledAppBundle(
+                bundle: bundle,
+                homeDirectory: fakeHome
+            )
+        )
+    }
+
+    @Test
+    func installedAppBundleSupportRejectsTemporaryLocations() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let fakeHome = directory.appendingPathComponent("fake-home", isDirectory: true)
+        try FileManager.default.createDirectory(at: fakeHome, withIntermediateDirectories: true)
+        let bundle = try makeFakeAppBundle(
+            appURL: directory.appendingPathComponent("build/Tokenmon.app", isDirectory: true)
+        )
+
+        #expect(
+            TokenmonInstalledAppBundleSupport.isInstalledAppBundle(
+                bundle: bundle,
+                homeDirectory: fakeHome
+            ) == false
+        )
+    }
+
+    @Test
     func launchAtLoginReleasePathDoesNotWriteFallbackLaunchAgent() throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -2434,9 +2472,73 @@ struct TokenmonPresentationTests {
             .appendingPathComponent("com.aroido.tokenmon.launch-at-login.plist", isDirectory: false)
 
         let state = try TokenmonLaunchAtLoginController.setEnabled(true, using: dependencies)
-        #expect(state.isSupported == false)
-        #expect(state.reason == TokenmonL10n.string("settings.launch_at_login.reason.status_unavailable"))
+        #expect(state.isSupported)
+        #expect(state.isEnabled == false)
+        #expect(state.reason == TokenmonL10n.string("settings.launch_at_login.reason.disabled"))
         #expect(FileManager.default.fileExists(atPath: plistURL.path) == false)
+    }
+
+    @Test
+    func launchAtLoginReleaseSnapshotTreatsNotFoundAsDisabledState() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let fakeHome = directory.appendingPathComponent("fake-home", isDirectory: true)
+        try FileManager.default.createDirectory(at: fakeHome, withIntermediateDirectories: true)
+        let bundle = try makeFakeAppBundle(
+            appURL: fakeHome.appendingPathComponent("Applications/Tokenmon.app", isDirectory: true)
+        )
+
+        let state = TokenmonLaunchAtLoginController.snapshot(
+            using: TokenmonLaunchAtLoginDependencies(
+                bundle: bundle,
+                fileManager: .default,
+                homeDirectory: fakeHome,
+                nativeStatusProvider: { .notFound },
+                nativeSetter: { _ in },
+                fallbackPolicy: .nativeOnly,
+                supportDirectoryPath: directory.path
+            )
+        )
+
+        #expect(state.isSupported)
+        #expect(state.isEnabled == false)
+        #expect(state.reason == TokenmonL10n.string("settings.launch_at_login.reason.disabled"))
+        #expect(state.showsOpenSystemSettingsAction == false)
+    }
+
+    @Test
+    func launchAtLoginReleasePathAttemptsNativeRegistrationWhenStatusIsNotFound() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let fakeHome = directory.appendingPathComponent("fake-home", isDirectory: true)
+        try FileManager.default.createDirectory(at: fakeHome, withIntermediateDirectories: true)
+        let bundle = try makeFakeAppBundle(
+            appURL: fakeHome.appendingPathComponent("Applications/Tokenmon.app", isDirectory: true)
+        )
+
+        final class Box: @unchecked Sendable {
+            var values: [Bool] = []
+        }
+        let box = Box()
+
+        _ = try TokenmonLaunchAtLoginController.setEnabled(
+            true,
+            using: TokenmonLaunchAtLoginDependencies(
+                bundle: bundle,
+                fileManager: .default,
+                homeDirectory: fakeHome,
+                nativeStatusProvider: { .notFound },
+                nativeSetter: { enabled in
+                    box.values.append(enabled)
+                },
+                fallbackPolicy: .nativeOnly,
+                supportDirectoryPath: directory.path
+            )
+        )
+
+        #expect(box.values == [true])
     }
 
     @Test
@@ -2624,6 +2726,157 @@ struct TokenmonPresentationTests {
         try manager.bootstrap()
 
         #expect(try manager.appSettings().notificationsEnabled == false)
+    }
+
+    @Test
+    func firstRunSetupPromptAutoPresentationPersistsOnceShown() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let databasePath = directory.appendingPathComponent("tokenmon.sqlite").path
+        let manager = TokenmonDatabaseManager(path: databasePath)
+        try manager.bootstrap()
+
+        let coordinator = CaptureNotificationCoordinatorSpy()
+        coordinator.authorizationState = .notDetermined
+
+        let model = TokenmonMenuModel(
+            databasePath: databasePath,
+            providerInspector: { _, _, _ in [] },
+            launchAtLoginStateProvider: {
+                TokenmonLaunchAtLoginState(
+                    isSupported: true,
+                    isEnabled: false,
+                    reason: TokenmonL10n.string("settings.launch_at_login.reason.disabled")
+                )
+            },
+            notificationCoordinator: coordinator
+        )
+
+        await model.waitForRefreshToFinish()
+        #expect(model.shouldShowSetupRecommendations)
+        #expect(model.shouldAutoPresentOnboarding)
+
+        model.markFirstRunOnboardingShown()
+
+        #expect(!model.shouldAutoPresentOnboarding)
+        #expect(try manager.appSettings().firstRunSetupPromptShown)
+    }
+
+    @Test
+    func setupRecommendationsPreferExplicitEnableActions() {
+        let items = TokenmonSetupRecommendationsBuilder.items(
+            appSettings: AppSettings(notificationsEnabled: false),
+            launchAtLoginState: TokenmonLaunchAtLoginState(
+                isSupported: true,
+                isEnabled: false,
+                reason: TokenmonL10n.string("settings.launch_at_login.reason.disabled")
+            ),
+            notificationAuthorizationState: .notDetermined
+        )
+
+        #expect(items.map(\.action) == [.enableLaunchAtLogin, .enableCaptureNotifications])
+    }
+
+    @Test
+    func setupRecommendationsUseRequestPermissionWhenNotificationsAreEnabledButUndetermined() {
+        let items = TokenmonSetupRecommendationsBuilder.items(
+            appSettings: AppSettings(notificationsEnabled: true),
+            launchAtLoginState: TokenmonLaunchAtLoginState(
+                isSupported: true,
+                isEnabled: true,
+                reason: TokenmonL10n.string("settings.launch_at_login.reason.enabled")
+            ),
+            notificationAuthorizationState: .notDetermined
+        )
+
+        #expect(items.map(\.action) == [.requestCaptureNotificationPermission])
+    }
+
+    @Test
+    func setupRecommendationsRouteDeniedNotificationsToSystemSettings() {
+        let items = TokenmonSetupRecommendationsBuilder.items(
+            appSettings: AppSettings(notificationsEnabled: true),
+            launchAtLoginState: TokenmonLaunchAtLoginState(
+                isSupported: true,
+                isEnabled: true,
+                reason: TokenmonL10n.string("settings.launch_at_login.reason.enabled")
+            ),
+            notificationAuthorizationState: .denied
+        )
+
+        #expect(items.map(\.action) == [.openNotificationSettings])
+    }
+
+    @Test
+    func firstRunSetupPromptSkipsWorkspaceOnlyLaunchStateWhenNotificationsAreConfigured() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let databasePath = directory.appendingPathComponent("tokenmon.sqlite").path
+        let manager = TokenmonDatabaseManager(path: databasePath)
+        try manager.bootstrap()
+
+        var settings = try manager.appSettings()
+        settings.notificationsEnabled = true
+        try manager.saveAppSettings(settings)
+
+        let coordinator = CaptureNotificationCoordinatorSpy()
+        coordinator.authorizationState = .authorized(alertsEnabled: true, soundsEnabled: true, alertStyle: 1)
+
+        let model = TokenmonMenuModel(
+            databasePath: databasePath,
+            providerInspector: { _, _, _ in [] },
+            launchAtLoginStateProvider: {
+                .unsupported(reason: TokenmonL10n.string("settings.launch_at_login.reason.installed_only"))
+            },
+            notificationCoordinator: coordinator
+        )
+
+        await model.waitForRefreshToFinish()
+        #expect(!model.shouldShowSetupRecommendations)
+        #expect(!model.shouldAutoPresentOnboarding)
+    }
+
+    @Test
+    func firstRunSetupPromptDoesNotAutoPresentOnceGameplayHistoryExists() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let databasePath = directory.appendingPathComponent("tokenmon.sqlite").path
+        let manager = TokenmonDatabaseManager(path: databasePath)
+        try manager.bootstrap()
+
+        _ = try manager.forgeEncounter(
+            TokenmonDeveloperEncounterForgeRequest(
+                provider: .codex,
+                field: .sky,
+                rarity: .uncommon,
+                speciesID: "SKY_012",
+                outcome: .captured,
+                occurredAt: "2026-04-05T00:00:00Z"
+            )
+        )
+
+        let coordinator = CaptureNotificationCoordinatorSpy()
+        coordinator.authorizationState = .notDetermined
+
+        let model = TokenmonMenuModel(
+            databasePath: databasePath,
+            providerInspector: { _, _, _ in [] },
+            launchAtLoginStateProvider: {
+                TokenmonLaunchAtLoginState(
+                    isSupported: true,
+                    isEnabled: false,
+                    reason: TokenmonL10n.string("settings.launch_at_login.reason.disabled")
+                )
+            },
+            notificationCoordinator: coordinator
+        )
+
+        await model.waitForRefreshToFinish()
+        #expect(model.shouldShowSetupRecommendations)
+        #expect(!model.shouldAutoPresentOnboarding)
     }
 
     @Test

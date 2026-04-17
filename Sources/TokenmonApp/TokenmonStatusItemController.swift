@@ -119,6 +119,8 @@ final class TokenmonAppController {
 
     private var dexWindowController: TokenmonHostingWindowController?
     private var settingsWindowController: TokenmonHostingWindowController?
+    private var onboardingWindowController: TokenmonHostingWindowController?
+    private var onboardingWindowCloseObserver: NSObjectProtocol?
     private var developerWindowController: TokenmonHostingWindowController?
 
     private init() {
@@ -347,6 +349,16 @@ final class TokenmonAppController {
                 supportDirectoryPath: supportDirectoryPath
             )
             await MainActor.run {
+                if TokenmonBuildInfo.current.buildConfiguration == .release,
+                   TokenmonInstalledAppBundleSupport.isInstalledAppBundle(),
+                   self.menuModel.shouldAutoPresentOnboarding {
+                    self.showOnboardingWindow(entrypoint: "startup")
+                    TokenmonAppBehaviorLogger.notice(
+                        category: "startup",
+                        event: "first_run_onboarding_presented",
+                        supportDirectoryPath: supportDirectoryPath
+                    )
+                }
                 self.menuModel.emitAppOpenedAnalyticsIfNeeded()
             }
         }
@@ -364,6 +376,7 @@ final class TokenmonAppController {
         recoveryTask = nil
         codexSessionStoreObserver?.stop()
         codexSessionStoreObserver = nil
+        clearOnboardingWindow(closeWindow: true)
         if let supervisor = geminiSupervisor {
             Task { @MainActor in
                 await supervisor.stop()
@@ -401,12 +414,64 @@ final class TokenmonAppController {
                 rootView: AnyView(
                     TokenmonSettingsPanel(
                         model: menuModel,
-                        appUpdater: appUpdater
+                        appUpdater: appUpdater,
+                        onOpenWelcomeGuide: { [weak self] in
+                            self?.showOnboardingWindow(entrypoint: "settings")
+                        }
                     )
                 )
             )
         }
         settingsWindowController?.show()
+    }
+
+    func showOnboardingWindow(entrypoint: String = "manual") {
+        clearOnboardingWindow(closeWindow: true)
+        analyticsTracker.captureSurfaceOpened(surface: .onboarding, entrypoint: entrypoint, settingsPane: nil)
+
+        let controller = TokenmonHostingWindowController(
+            title: TokenmonL10n.string("window.title.welcome_guide"),
+            defaultSize: NSSize(width: 720, height: 620),
+            autosaveName: "TokenmonOnboardingWindow",
+            rootView: AnyView(
+                TokenmonOnboardingPanel(
+                    model: menuModel,
+                    onPerformSetupAction: { [weak self] action in
+                        self?.performOnboardingSetupAction(action)
+                    },
+                    onOpenProvidersSettings: { [weak self] in
+                        self?.showSettings(pane: .providers)
+                    },
+                    onSkip: { [weak self] in
+                        self?.dismissOnboarding(reason: "skip")
+                    },
+                    onFinish: { [weak self] in
+                        self?.dismissOnboarding(reason: "finish")
+                    }
+                )
+            )
+        )
+
+        onboardingWindowController = controller
+        if let window = controller.window {
+            onboardingWindowCloseObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.willCloseNotification,
+                object: window,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.handleOnboardingWindowClosedByUser()
+                }
+            }
+        }
+
+        TokenmonAppBehaviorLogger.notice(
+            category: "onboarding",
+            event: "onboarding_window_shown",
+            metadata: ["entrypoint": entrypoint],
+            supportDirectoryPath: menuModel.supportDirectoryPath
+        )
+        controller.show()
     }
 
     func showDeveloperWindow() {
@@ -453,6 +518,56 @@ final class TokenmonAppController {
             field: encounter?.field,
             rarity: encounter?.rarity
         )
+    }
+
+    private func performOnboardingSetupAction(_ action: TokenmonSetupRecommendationAction) {
+        switch action {
+        case .enableLaunchAtLogin:
+            menuModel.setLaunchAtLogin(true)
+        case .openLoginItemsSettings:
+            menuModel.openLoginItemsSettings()
+        case .enableCaptureNotifications:
+            menuModel.updateNotificationsEnabled(true)
+        case .requestCaptureNotificationPermission:
+            menuModel.requestCaptureNotificationPermission()
+        case .openNotificationSettings:
+            menuModel.openSystemNotificationSettings()
+        }
+    }
+
+    private func dismissOnboarding(reason: String) {
+        menuModel.markFirstRunOnboardingShown()
+        TokenmonAppBehaviorLogger.notice(
+            category: "onboarding",
+            event: "onboarding_window_dismissed",
+            metadata: ["reason": reason],
+            supportDirectoryPath: menuModel.supportDirectoryPath
+        )
+        clearOnboardingWindow(closeWindow: true)
+    }
+
+    private func handleOnboardingWindowClosedByUser() {
+        menuModel.markFirstRunOnboardingShown()
+        TokenmonAppBehaviorLogger.notice(
+            category: "onboarding",
+            event: "onboarding_window_dismissed",
+            metadata: ["reason": "window_close"],
+            supportDirectoryPath: menuModel.supportDirectoryPath
+        )
+        clearOnboardingWindow(closeWindow: false)
+    }
+
+    private func clearOnboardingWindow(closeWindow: Bool) {
+        if let observer = onboardingWindowCloseObserver {
+            NotificationCenter.default.removeObserver(observer)
+            onboardingWindowCloseObserver = nil
+        }
+
+        if closeWindow {
+            onboardingWindowController?.close()
+        }
+
+        onboardingWindowController = nil
     }
 
     private func makePopoverRootView(
