@@ -346,9 +346,11 @@ verify_notarized_outputs() {
 }
 
 write_checksums() {
+  local sha256_output
+  sha256_output="$(cd "$(dirname "$SHA256_PATH")" && pwd)/$(basename "$SHA256_PATH")"
   (
     cd "$OUTPUT_DIR"
-    shasum -a 256 "$ZIP_NAME" "$DMG_NAME" > "$SHA256_PATH"
+    shasum -a 256 "$ZIP_NAME" "$DMG_NAME" > "$sha256_output"
   )
 }
 
