@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PLIST_TEMPLATE="$ROOT/Packaging/Tokenmon-Info.plist"
+
+. "$ROOT/scripts/load-local-release-env.sh" "$ROOT"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/dist/releases}"
 APP_NAME="Tokenmon"
 EXECUTABLE_NAME="TokenmonApp"

@@ -810,6 +810,7 @@ private struct TokenmonHeroCompanionImage: View {
 struct TokenmonSettingsPanel: View {
     @ObservedObject var model: TokenmonMenuModel
     @ObservedObject var appUpdater: TokenmonAppUpdater
+    let onOpenWelcomeGuide: () -> Void
     @State private var pendingPathSelection: TokenmonSettingsPathSelection?
 
     var body: some View {
@@ -828,8 +829,10 @@ struct TokenmonSettingsPanel: View {
                     onUpdateProviderStatusVisibility: model.updateProviderStatusVisibility,
                     onUpdateFieldBackplateEnabled: model.updateFieldBackplateEnabled,
                     onUpdateNotificationsEnabled: model.updateNotificationsEnabled,
+                    onRequestNotificationPermission: model.requestCaptureNotificationPermission,
                     onUpdateUsageAnalyticsEnabled: model.updateUsageAnalyticsEnabled,
-                    onOpenSystemNotificationSettings: model.openSystemNotificationSettings
+                    onOpenSystemNotificationSettings: model.openSystemNotificationSettings,
+                    onOpenWelcomeGuide: onOpenWelcomeGuide
                 )
         } providers: {
             TokenmonProviderSettingsPane(
@@ -984,8 +987,10 @@ struct TokenmonGeneralSettingsPane: View {
     let onUpdateProviderStatusVisibility: (Bool) -> Void
     let onUpdateFieldBackplateEnabled: (Bool) -> Void
     let onUpdateNotificationsEnabled: (Bool) -> Void
+    let onRequestNotificationPermission: () -> Void
     let onUpdateUsageAnalyticsEnabled: (Bool) -> Void
     let onOpenSystemNotificationSettings: () -> Void
+    let onOpenWelcomeGuide: () -> Void
     private let buildInfo = TokenmonBuildInfo.current
 
     var body: some View {
@@ -993,7 +998,9 @@ struct TokenmonGeneralSettingsPane: View {
             VStack(alignment: .leading, spacing: 18) {
                 TokenmonSettingsPaneHeader(
                     title: TokenmonL10n.string("settings.general.header.title"),
-                    subtitle: TokenmonL10n.string("settings.general.header.subtitle")
+                    subtitle: TokenmonL10n.string("settings.general.header.subtitle"),
+                    actionTitle: TokenmonL10n.string("settings.general.open_welcome_guide"),
+                    action: onOpenWelcomeGuide
                 )
 
                 TokenmonSettingsBanner(
@@ -1002,6 +1009,24 @@ struct TokenmonGeneralSettingsPane: View {
                         error: settingsError
                     )
                 )
+
+                if shouldShowSetupRecommendations {
+                    TokenmonSettingsSectionCard(
+                        title: TokenmonL10n.string("settings.general.section.quick_setup"),
+                        systemImage: "sparkles"
+                    ) {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text(TokenmonL10n.string("settings.general.quick_setup.note"))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+
+                            TokenmonSetupRecommendationList(
+                                items: setupRecommendations,
+                                onPerformAction: performSetupRecommendation
+                            )
+                        }
+                    }
+                }
 
                 TokenmonSettingsSectionCard(title: TokenmonL10n.string("settings.general.section.startup"), systemImage: "power") {
                     VStack(alignment: .leading, spacing: 12) {
@@ -1022,12 +1047,11 @@ struct TokenmonGeneralSettingsPane: View {
                             tint: launchStatusTint
                         )
 
-                        if launchAtLoginState.showsOpenSystemSettingsAction {
-                            Button(TokenmonL10n.string("settings.general.open_login_items_settings")) {
-                                onOpenLoginItemsSettings()
-                            }
-                            .buttonStyle(.glass)
+                        Button(TokenmonL10n.string("settings.general.open_login_items_settings")) {
+                            onOpenLoginItemsSettings()
                         }
+                        .buttonStyle(.glass)
+                        .disabled(launchAtLoginState.isSupported == false)
                     }
                 }
 
@@ -1191,71 +1215,49 @@ struct TokenmonGeneralSettingsPane: View {
     }
 
     private var launchStatusSymbol: String {
-        if launchAtLoginState.isSupported == false {
-            return "exclamationmark.triangle.fill"
-        }
-        return launchAtLoginState.isEnabled ? "checkmark.circle.fill" : "info.circle.fill"
+        TokenmonSetupRecommendationsBuilder.launchStatusSymbol(launchAtLoginState)
     }
 
     private var launchStatusTint: Color {
-        if launchAtLoginState.isSupported == false {
-            return .orange
-        }
-        return launchAtLoginState.isEnabled ? .green : .secondary
+        TokenmonSetupRecommendationsBuilder.launchStatusTint(launchAtLoginState).color
+    }
+
+    private var shouldShowSetupRecommendations: Bool {
+        setupRecommendations.isEmpty == false
     }
 
     private var notificationAuthorizationDetail: String {
-        switch notificationAuthorizationState {
-        case .unknown:
-            return TokenmonL10n.string("settings.notifications.status.checking")
-        case .notDetermined:
-            return TokenmonL10n.string("settings.notifications.status.not_determined")
-        case .denied:
-            return TokenmonL10n.string("settings.notifications.status.denied")
-        case .authorized(let alertsEnabled, let soundsEnabled, let alertStyle):
-            if alertsEnabled {
-                let styleSummary: String
-                switch alertStyle {
-                case 0:
-                    styleSummary = TokenmonL10n.string("settings.notifications.style.none")
-                case 1:
-                    styleSummary = TokenmonL10n.string("settings.notifications.style.banners")
-                case 2:
-                    styleSummary = TokenmonL10n.string("settings.notifications.style.alerts")
-                default:
-                    styleSummary = TokenmonL10n.string("settings.notifications.style.unknown")
-                }
-                return soundsEnabled
-                    ? TokenmonL10n.format("settings.notifications.status.authorized_with_sound", styleSummary)
-                    : TokenmonL10n.format("settings.notifications.status.authorized_without_sound", styleSummary)
-            }
-            return TokenmonL10n.string("settings.notifications.status.alerts_disabled")
-        }
+        TokenmonSetupRecommendationsBuilder.notificationAuthorizationDetail(notificationAuthorizationState)
     }
 
     private var notificationAuthorizationSymbol: String {
-        switch notificationAuthorizationState {
-        case .unknown:
-            return "hourglass"
-        case .notDetermined:
-            return "questionmark.circle.fill"
-        case .denied:
-            return "bell.slash.fill"
-        case .authorized(let alertsEnabled, _, _):
-            return alertsEnabled ? "checkmark.circle.fill" : "bell.badge.slash.fill"
-        }
+        TokenmonSetupRecommendationsBuilder.notificationAuthorizationSymbol(notificationAuthorizationState)
     }
 
     private var notificationAuthorizationTint: Color {
-        switch notificationAuthorizationState {
-        case .unknown:
-            return .secondary
-        case .notDetermined:
-            return .orange
-        case .denied:
-            return .red
-        case .authorized(let alertsEnabled, _, _):
-            return alertsEnabled ? .green : .orange
+        TokenmonSetupRecommendationsBuilder.notificationAuthorizationTint(notificationAuthorizationState).color
+    }
+
+    private var setupRecommendations: [TokenmonSetupRecommendationItem] {
+        TokenmonSetupRecommendationsBuilder.items(
+            appSettings: appSettings,
+            launchAtLoginState: launchAtLoginState,
+            notificationAuthorizationState: notificationAuthorizationState
+        )
+    }
+
+    private func performSetupRecommendation(_ action: TokenmonSetupRecommendationAction) {
+        switch action {
+        case .enableLaunchAtLogin:
+            onSetLaunchAtLogin(true)
+        case .openLoginItemsSettings:
+            onOpenLoginItemsSettings()
+        case .enableCaptureNotifications:
+            onUpdateNotificationsEnabled(true)
+        case .requestCaptureNotificationPermission:
+            onRequestNotificationPermission()
+        case .openNotificationSettings:
+            onOpenSystemNotificationSettings()
         }
     }
 }

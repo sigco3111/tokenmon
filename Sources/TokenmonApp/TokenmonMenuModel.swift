@@ -374,14 +374,7 @@ final class TokenmonMenuModel: ObservableObject {
         guard persist(settings: settings) else {
             return
         }
-        notificationCoordinator.notificationsPreferenceDidChange(isEnabled: value) { [weak self] message, error in
-            guard let self else {
-                return
-            }
-            self.settingsMessage = message
-            self.settingsError = error
-            self.refreshNotificationAuthorizationState()
-        }
+        runNotificationPreferenceFlow(isEnabled: value)
     }
 
     func updateUsageAnalyticsEnabled(_ value: Bool) {
@@ -408,6 +401,24 @@ final class TokenmonMenuModel: ObservableObject {
         var settings = appSettings
         settings.usageAnalyticsPromptDismissed = true
         _ = persist(settings: settings)
+    }
+
+    func requestCaptureNotificationPermission() {
+        runNotificationPreferenceFlow(isEnabled: true)
+    }
+
+    func markFirstRunOnboardingShown() {
+        guard appSettings.firstRunSetupPromptShown == false else {
+            return
+        }
+
+        var settings = appSettings
+        settings.firstRunSetupPromptShown = true
+        guard persist(settings: settings) else {
+            return
+        }
+
+        logInfo(category: "settings", event: "first_run_onboarding_marked_shown")
     }
 
     func openSystemNotificationSettings() {
@@ -1061,6 +1072,16 @@ final class TokenmonMenuModel: ObservableObject {
         !appSettings.usageAnalyticsEnabled && !appSettings.usageAnalyticsPromptDismissed
     }
 
+    var shouldShowSetupRecommendations: Bool {
+        setupRecommendations.isEmpty == false
+    }
+
+    var shouldAutoPresentOnboarding: Bool {
+        !appSettings.firstRunSetupPromptShown
+            && isLikelyFreshInstallForSetupPrompt
+            && shouldShowSetupRecommendations
+    }
+
     var launchAtLoginState: TokenmonLaunchAtLoginState { diagnosticsSnapshot.launchAtLoginState }
 
     var gameplayStartedAt: String? { diagnosticsSnapshot.databaseSummary?.gameplayStartedAt }
@@ -1294,6 +1315,35 @@ final class TokenmonMenuModel: ObservableObject {
                 event: "notification_authorization_state_refreshed",
                 metadata: ["state": String(describing: state)]
             )
+        }
+    }
+
+    private var setupRecommendations: [TokenmonSetupRecommendationItem] {
+        TokenmonSetupRecommendationsBuilder.items(
+            appSettings: appSettings,
+            launchAtLoginState: launchAtLoginState,
+            notificationAuthorizationState: notificationAuthorizationState
+        )
+    }
+
+    private var isLikelyFreshInstallForSetupPrompt: Bool {
+        guard let summary else {
+            return false
+        }
+
+        return summary.providerSessions == 0
+            && summary.usageSamples == 0
+            && summary.totalEncounters == 0
+    }
+
+    private func runNotificationPreferenceFlow(isEnabled: Bool) {
+        notificationCoordinator.notificationsPreferenceDidChange(isEnabled: isEnabled) { [weak self] message, error in
+            guard let self else {
+                return
+            }
+            self.settingsMessage = message
+            self.settingsError = error
+            self.refreshNotificationAuthorizationState()
         }
     }
 
@@ -1629,7 +1679,35 @@ enum TokenmonLaunchAtLoginController {
                 isEnabled: false,
                 reason: TokenmonL10n.string("settings.launch_at_login.reason.disabled")
             )
-        case .notFound, .statusUnavailable:
+        case .notFound:
+            if dependencies.fallbackPolicy.allowsLegacyFallback {
+                if fallbackAgent.isSupported {
+                    try? fallbackAgent.migrateIfNeeded()
+                    let isEnabled = fallbackAgent.isEnabled
+                    return TokenmonLaunchAtLoginState(
+                        isSupported: true,
+                        isEnabled: isEnabled,
+                        reason: TokenmonL10n.string(
+                            isEnabled
+                                ? "settings.launch_at_login.reason.enabled"
+                                : "settings.launch_at_login.reason.disabled"
+                        )
+                    )
+                }
+
+                return .unsupported(reason: TokenmonL10n.string("settings.launch_at_login.reason.installed_only"))
+            }
+
+            logInfo(
+                dependencies: dependencies,
+                event: "launch_at_login_native_status_treated_as_unregistered"
+            )
+            return TokenmonLaunchAtLoginState(
+                isSupported: true,
+                isEnabled: false,
+                reason: TokenmonL10n.string("settings.launch_at_login.reason.disabled")
+            )
+        case .statusUnavailable:
             if dependencies.fallbackPolicy.allowsLegacyFallback {
                 if fallbackAgent.isSupported {
                     try? fallbackAgent.migrateIfNeeded()
@@ -1687,7 +1765,24 @@ enum TokenmonLaunchAtLoginController {
                 metadata: ["enabled": String(enabled)]
             )
             try dependencies.nativeSetter(enabled)
-        case .notFound, .statusUnavailable:
+        case .notFound:
+            if dependencies.fallbackPolicy.allowsLegacyFallback {
+                guard fallbackAgent.isSupported else {
+                    return snapshot(using: dependencies)
+                }
+                try fallbackAgent.setEnabled(enabled)
+                return snapshot(using: dependencies)
+            }
+
+            if enabled {
+                logInfo(
+                    dependencies: dependencies,
+                    event: "launch_at_login_native_registration_attempted",
+                    metadata: ["enabled": String(enabled)]
+                )
+                try dependencies.nativeSetter(true)
+            }
+        case .statusUnavailable:
             guard dependencies.fallbackPolicy.allowsLegacyFallback, fallbackAgent.isSupported else {
                 logInfo(
                     dependencies: dependencies,

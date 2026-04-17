@@ -1,4 +1,5 @@
 "common.browse" = "찾아보기…";
+"common.back" = "뒤로";
 "common.built" = "빌드";
 "brand.aroido" = "Aroido";
 "common.github" = "GitHub";
@@ -33,6 +34,7 @@
 "popover.action.quit" = "Tokenmon 종료";
 "window.title.dex" = "Dex";
 "window.title.settings" = "설정";
+"window.title.welcome_guide" = "Tokenmon 시작하기";
 "window.title.developer_tools" = "개발자 도구";
 
 "menu.headline.unavailable" = "Tokenmon을 사용할 수 없음";
@@ -308,6 +310,7 @@
 "settings.banner.updated" = "적용됨";
 
 "settings.general.header.title" = "일반";
+"settings.general.open_welcome_guide" = "시작 가이드 열기";
 "settings.general.header.subtitle" = "Tokenmon 시작 방식, 화면 모드, 메뉴 막대 표시 항목을 조정합니다.";
 "analytics.prompt.title" = "Tokenmon 개선에 참여하기";
 "analytics.prompt.subtitle" = "앱 실행, 조우, 프로바이더 설정, 업데이트 상태 같은 익명 사용 지표를 선택적으로 보내면 초기 품질을 개선하는 데 도움이 됩니다. 프롬프트와 모델 응답은 절대 보내지 않습니다.";
@@ -324,6 +327,15 @@
 "settings.language.option.system" = "시스템 설정 따르기";
 "settings.language.option.english" = "English";
 "settings.language.option.korean" = "한국어";
+"settings.general.section.quick_setup" = "빠른 설정";
+"settings.general.quick_setup.note" = "Tokenmon은 여기서 로그인 시 실행을 켠 뒤에야 macOS 로그인 항목에 나타나고, 포획 알림 권한을 명시적으로 요청한 뒤에야 알림 목록에 나타납니다.";
+"settings.general.quick_setup.launch_title" = "로그인 시 실행";
+"settings.general.quick_setup.notifications_title" = "포획 알림";
+"settings.general.quick_setup.notifications.preference_off" = "macOS에서는 이미 Tokenmon 알림을 허용했지만, Tokenmon 안의 포획 알림은 아직 꺼져 있습니다.";
+"settings.general.quick_setup.complete" = "이 Mac에서는 로그인 시 실행과 포획 알림이 이미 잘 준비되어 있습니다.";
+"settings.general.quick_setup.action.enable_launch_at_login" = "로그인 시 실행 켜기";
+"settings.general.quick_setup.action.enable_capture_notifications" = "포획 알림 켜기";
+"settings.general.quick_setup.action.request_notification_permission" = "알림 권한 요청";
 "settings.general.section.startup" = "시작";
 "settings.general.toggle.launch_at_login" = "로그인 시 실행";
 "settings.general.open_login_items_settings" = "로그인 항목 설정 열기";
@@ -397,6 +409,26 @@
 "settings.feedback.preview_alert_missing_species" = "미리보기 알림용 종 %1$@을(를) 찾지 못했습니다.";
 "settings.feedback.preview_alert_notifications_unavailable" = "macOS에서 Tokenmon 알림이 꺼져 있습니다. 미리보기 전에 설정에서 알림을 허용하세요.";
 "settings.feedback.preview_alert_scheduled" = "포획 알림 미리보기를 예약했습니다. macOS 배너가 보이도록 Tokenmon을 잠시 백그라운드로 보냅니다.";
+"onboarding.action.skip" = "지금은 건너뛰기";
+"onboarding.action.continue" = "계속";
+"onboarding.action.finish" = "마치기";
+"onboarding.welcome.title" = "Tokenmon에 오신 것을 환영합니다";
+"onboarding.welcome.subtitle" = "Tokenmon은 평소의 Claude/Codex 사용을 조용한 수집 루프로 바꿔주는 메뉴바 동반 앱입니다.";
+"onboarding.welcome.section_title" = "Tokenmon이 하는 일";
+"onboarding.welcome.body" = "평소처럼 코딩을 계속하면 됩니다. Tokenmon이 로컬 활동을 관찰해 배경에서 탐색을 쌓고, 각 조우를 포획 또는 도주로 조용히 해결합니다.";
+"onboarding.welcome.bullet.explore" = "Tokenmon이 실행 중일 때 사용량이 탐색으로 쌓입니다.";
+"onboarding.welcome.bullet.resolve" = "종은 자동으로 나타나고 별도 조작 없이 해결됩니다.";
+"onboarding.welcome.bullet.dex" = "메뉴바와 Dex는 같은 로컬 게임 상태를 함께 보여줍니다.";
+"onboarding.welcome.next_steps.title" = "다음에 설정할 것";
+"onboarding.welcome.next_steps.body" = "다음 화면에서 로그인 시 실행과 포획 알림 같은 선택형 시스템 기능을 보여주고, 마지막에 프로바이더 상태를 짧게 요약합니다. 전부 건너뛰고 나중에 일반 설정에서 다시 열 수 있습니다.";
+"onboarding.permissions.title" = "선택형 권한";
+"onboarding.permissions.subtitle" = "Tokenmon이 사용할 시스템 기능만 직접 켜세요.";
+"onboarding.permissions.section_title" = "시스템 설정";
+"onboarding.permissions.body" = "Tokenmon은 여기서 기능을 명시적으로 켠 뒤에야 macOS 로그인 항목이나 알림 설정 목록에 나타납니다.";
+"onboarding.providers.title" = "프로바이더 요약";
+"onboarding.providers.subtitle" = "이 Mac에서 Claude, Codex, Gemini가 현재 어떤 상태인지 보여줍니다.";
+"onboarding.providers.open_settings" = "프로바이더 설정 열기";
+"onboarding.providers.note" = "프로바이더 연결과 복구는 Settings > Providers에 남겨 두어, 시작 가이드는 짧고 가볍게 유지합니다.";
 "settings.feedback.rerun_bootstrap" = "Tokenmon이 로컬 저장소를 새로 고치고 프로바이더 inbox 파일을 다시 불러왔습니다.";
 "settings.feedback.reseed_species" = "종 카탈로그를 다시 적용했습니다. 총 %1$d종, 신규 삽입 %2$d종입니다.";
 "settings.feedback.rescan_inbox" = "Tokenmon이 로컬 inbox 파일을 다시 재생하고 런타임 상태를 갱신했습니다.";

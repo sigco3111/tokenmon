@@ -517,6 +517,8 @@ private extension TokenmonRefreshSurface {
             return "dex"
         case .settings:
             return "settings"
+        case .onboarding:
+            return "onboarding"
         case .developer:
             return "developer"
         }

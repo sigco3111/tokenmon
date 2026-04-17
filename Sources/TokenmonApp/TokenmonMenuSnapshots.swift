@@ -14,6 +14,7 @@ enum TokenmonRefreshSurface: Sendable {
     case stats
     case dex
     case settings
+    case onboarding
     case developer
 }
 
@@ -60,7 +61,7 @@ extension TokenmonRefreshReason {
             return .runtime
         case .surfaceOpened(.tokens), .surfaceOpened(.stats), .surfaceOpened(.dex):
             return .insights
-        case .surfaceOpened(.settings):
+        case .surfaceOpened(.settings), .surfaceOpened(.onboarding):
             return .diagnostics
         case .surfaceOpened(.developer):
             return .all
