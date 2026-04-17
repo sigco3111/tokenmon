@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import TokenmonDomain
 import TokenmonPersistence
 
 enum TokenmonSetupRecommendationAction: Equatable, Sendable {
@@ -280,17 +281,14 @@ private struct TokenmonSetupRecommendationRow: View {
 
 enum TokenmonFirstRunOnboardingStep: Int, CaseIterable, Sendable {
     case welcome
-    case permissions
-    case providers
+    case setup
 
     var title: String {
         switch self {
         case .welcome:
             return TokenmonL10n.string("onboarding.welcome.title")
-        case .permissions:
-            return TokenmonL10n.string("onboarding.permissions.title")
-        case .providers:
-            return TokenmonL10n.string("onboarding.providers.title")
+        case .setup:
+            return TokenmonL10n.string("onboarding.setup.title")
         }
     }
 
@@ -298,10 +296,8 @@ enum TokenmonFirstRunOnboardingStep: Int, CaseIterable, Sendable {
         switch self {
         case .welcome:
             return TokenmonL10n.string("onboarding.welcome.subtitle")
-        case .permissions:
-            return TokenmonL10n.string("onboarding.permissions.subtitle")
-        case .providers:
-            return TokenmonL10n.string("onboarding.providers.subtitle")
+        case .setup:
+            return TokenmonL10n.string("onboarding.setup.subtitle")
         }
     }
 
@@ -325,52 +321,54 @@ struct TokenmonOnboardingPanel: View {
     @State private var currentStep: TokenmonFirstRunOnboardingStep = .welcome
 
     let onPerformSetupAction: (TokenmonSetupRecommendationAction) -> Void
-    let onOpenProvidersSettings: () -> Void
     let onSkip: () -> Void
     let onFinish: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            TokenmonSettingsPaneHeader(
-                title: currentStep.title,
-                subtitle: currentStep.subtitle
-            )
+        ZStack {
+            TokenmonOnboardingBackdrop()
 
-            TokenmonOnboardingProgressView(currentStep: currentStep)
-
-            TokenmonSettingsBanner(
-                banner: TokenmonSettingsPresentationBuilder.banner(
-                    message: model.settingsMessage,
-                    error: model.settingsError
+            VStack(alignment: .leading, spacing: 16) {
+                TokenmonOnboardingHeader(
+                    title: currentStep.title,
+                    subtitle: currentStep.subtitle
                 )
-            )
 
-            Group {
-                switch currentStep {
-                case .welcome:
-                    TokenmonOnboardingWelcomeStep()
-                case .permissions:
-                    TokenmonOnboardingPermissionsStep(
-                        appSettings: model.appSettings,
-                        launchAtLoginState: model.launchAtLoginState,
-                        notificationAuthorizationState: model.notificationAuthorizationState,
-                        onPerformSetupAction: onPerformSetupAction
+                TokenmonOnboardingProgressView(currentStep: currentStep)
+
+                TokenmonSettingsBanner(
+                    banner: TokenmonSettingsPresentationBuilder.banner(
+                        message: model.settingsMessage,
+                        error: model.settingsError
                     )
-                case .providers:
-                    TokenmonOnboardingProvidersStep(
-                        onboardingStatuses: model.onboardingStatuses,
-                        providerHealthSummaries: model.providerHealthSummaries
-                    )
+                )
+
+                ScrollView {
+                    Group {
+                        switch currentStep {
+                        case .welcome:
+                            TokenmonOnboardingWelcomeStep()
+                        case .setup:
+                            TokenmonOnboardingSetupStep(
+                                appSettings: model.appSettings,
+                                launchAtLoginState: model.launchAtLoginState,
+                                notificationAuthorizationState: model.notificationAuthorizationState,
+                                onPerformSetupAction: onPerformSetupAction
+                            )
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .padding(.trailing, 4)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+                Divider()
+
+                footer
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-
-            Divider()
-
-            footer
         }
-        .padding(24)
-        .frame(minWidth: 720, minHeight: 620, alignment: .topLeading)
+        .padding(20)
+        .frame(minWidth: 620, minHeight: 500, alignment: .topLeading)
         .environment(\.locale, TokenmonL10n.activeLocale)
         .onAppear {
             model.surfaceOpened(.onboarding, entrypoint: "window_content", emitAnalytics: false)
@@ -390,11 +388,11 @@ struct TokenmonOnboardingPanel: View {
                 Spacer()
 
                 Button(TokenmonL10n.string("onboarding.action.continue")) {
-                    currentStep = .permissions
+                    currentStep = .setup
                 }
                 .buttonStyle(.glassProminent)
             }
-        case .permissions:
+        case .setup:
             HStack {
                 Button(TokenmonL10n.string("common.back")) {
                     currentStep = .welcome
@@ -402,30 +400,6 @@ struct TokenmonOnboardingPanel: View {
                 .buttonStyle(.glass)
 
                 Spacer()
-
-                Button(TokenmonL10n.string("onboarding.action.skip")) {
-                    onSkip()
-                }
-                .buttonStyle(.glass)
-
-                Button(TokenmonL10n.string("onboarding.action.continue")) {
-                    currentStep = .providers
-                }
-                .buttonStyle(.glassProminent)
-            }
-        case .providers:
-            HStack {
-                Button(TokenmonL10n.string("common.back")) {
-                    currentStep = .permissions
-                }
-                .buttonStyle(.glass)
-
-                Spacer()
-
-                Button(TokenmonL10n.string("onboarding.providers.open_settings")) {
-                    onOpenProvidersSettings()
-                }
-                .buttonStyle(.glass)
 
                 Button(TokenmonL10n.string("onboarding.action.finish")) {
                     onFinish()
@@ -436,240 +410,625 @@ struct TokenmonOnboardingPanel: View {
     }
 }
 
+private struct TokenmonOnboardingBackdrop: View {
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color(nsColor: .windowBackgroundColor),
+                    Color.accentColor.opacity(0.05),
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+
+            Circle()
+                .fill(Color(red: 0.28, green: 0.67, blue: 0.38).opacity(0.12))
+                .frame(width: 280, height: 280)
+                .blur(radius: 32)
+                .offset(x: -180, y: -150)
+
+            Circle()
+                .fill(Color.accentColor.opacity(0.10))
+                .frame(width: 240, height: 240)
+                .blur(radius: 32)
+                .offset(x: 210, y: -120)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+    }
+}
+
+private struct TokenmonOnboardingHeader: View {
+    let title: String
+    let subtitle: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(TokenmonL10n.string("onboarding.header.kicker"))
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .tracking(1.1)
+                .foregroundStyle(.secondary)
+                .textCase(.uppercase)
+
+            Text(title)
+                .font(.system(size: 31, weight: .bold, design: .rounded))
+                .foregroundStyle(.primary)
+
+            Text(subtitle)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
 private struct TokenmonOnboardingProgressView: View {
     let currentStep: TokenmonFirstRunOnboardingStep
 
     var body: some View {
-        HStack(spacing: 12) {
-            ForEach(TokenmonFirstRunOnboardingStep.allCases, id: \.self) { step in
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 8) {
-                        Circle()
-                            .fill(step.rawValue <= currentStep.rawValue ? Color.accentColor : Color.secondary.opacity(0.2))
-                            .frame(width: 10, height: 10)
-                        Text(step.title)
-                            .font(.caption.weight(step == currentStep ? .semibold : .regular))
-                    }
+        let allSteps = TokenmonFirstRunOnboardingStep.allCases
 
-                    Rectangle()
-                        .fill(step == .providers ? Color.clear : step.rawValue < currentStep.rawValue ? Color.accentColor : Color.secondary.opacity(0.15))
-                        .frame(height: 3)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+        HStack(spacing: 10) {
+            ForEach(allSteps, id: \.self) { step in
+                TokenmonOnboardingStepPill(
+                    step: step,
+                    currentStep: currentStep,
+                    title: step == .welcome
+                        ? TokenmonL10n.string("onboarding.progress.welcome")
+                        : TokenmonL10n.string("onboarding.progress.setup")
+                )
             }
+        }
+    }
+}
+
+private struct TokenmonOnboardingStepPill: View {
+    let step: TokenmonFirstRunOnboardingStep
+    let currentStep: TokenmonFirstRunOnboardingStep
+    let title: String
+
+    private var isCurrent: Bool { step == currentStep }
+    private var isCompleted: Bool { step.rawValue < currentStep.rawValue }
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Image(systemName: isCurrent ? "sparkles" : isCompleted ? "checkmark.circle.fill" : "circle.fill")
+                .font(.system(size: 10, weight: .semibold))
+            Text(title)
+                .font(.caption.weight(isCurrent ? .semibold : .regular))
+                .lineLimit(1)
+                .minimumScaleFactor(0.9)
+        }
+        .foregroundStyle(foregroundColor)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            Capsule(style: .continuous)
+                .fill(backgroundColor)
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .stroke(borderColor, lineWidth: 1)
+        )
+    }
+
+    private var foregroundColor: Color {
+        if isCurrent {
+            return .primary
+        }
+        if isCompleted {
+            return Color.accentColor
+        }
+        return .secondary
+    }
+
+    private var backgroundColor: Color {
+        if isCurrent {
+            return Color(nsColor: .controlBackgroundColor).opacity(0.92)
+        }
+        if isCompleted {
+            return Color.accentColor.opacity(0.10)
+        }
+        return Color(nsColor: .controlBackgroundColor).opacity(0.45)
+    }
+
+    private var borderColor: Color {
+        if isCurrent {
+            return Color.accentColor.opacity(0.28)
+        }
+        if isCompleted {
+            return Color.accentColor.opacity(0.18)
+        }
+        return Color.secondary.opacity(0.08)
+    }
+}
+
+private enum TokenmonOnboardingBeat: CaseIterable, Hashable {
+    case explore
+    case encounter
+    case resolve
+    case dex
+
+    var systemImage: String {
+        switch self {
+        case .explore:
+            return "figure.walk.motion"
+        case .encounter:
+            return "sparkles.rectangle.stack"
+        case .resolve:
+            return "wand.and.stars"
+        case .dex:
+            return "books.vertical"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .explore:
+            return TokenmonL10n.string("onboarding.welcome.beat.explore.title")
+        case .encounter:
+            return TokenmonL10n.string("onboarding.welcome.beat.encounter.title")
+        case .resolve:
+            return TokenmonL10n.string("onboarding.welcome.beat.resolve.title")
+        case .dex:
+            return TokenmonL10n.string("onboarding.welcome.beat.dex.title")
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .explore:
+            return TokenmonL10n.string("onboarding.welcome.beat.explore.detail")
+        case .encounter:
+            return TokenmonL10n.string("onboarding.welcome.beat.encounter.detail")
+        case .resolve:
+            return TokenmonL10n.string("onboarding.welcome.beat.resolve.detail")
+        case .dex:
+            return TokenmonL10n.string("onboarding.welcome.beat.dex.detail")
         }
     }
 }
 
 private struct TokenmonOnboardingWelcomeStep: View {
+    private let sceneContext = TokenmonSceneContext(
+        sceneState: .exploring,
+        fieldKind: .grassland,
+        fieldState: .exploring,
+        effectState: .none,
+        wildState: .hidden
+    )
+
+    private var companionAssetKeys: [String] {
+        SpeciesCatalog.all
+            .filter { $0.isActive && $0.field == FieldType.grassland }
+            .prefix(4)
+            .map(\.assetKey)
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            TokenmonSettingsSectionCard(
-                title: TokenmonL10n.string("onboarding.welcome.section_title"),
-                systemImage: "sparkles"
-            ) {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(TokenmonL10n.string("onboarding.welcome.body"))
-                        .font(.body)
+        VStack(alignment: .leading, spacing: 16) {
+            TokenmonOnboardingHeroCard(
+                sceneContext: sceneContext,
+                companionAssetKeys: companionAssetKeys
+            )
 
-                    VStack(alignment: .leading, spacing: 8) {
-                        TokenmonOnboardingBullet(text: TokenmonL10n.string("onboarding.welcome.bullet.explore"))
-                        TokenmonOnboardingBullet(text: TokenmonL10n.string("onboarding.welcome.bullet.resolve"))
-                        TokenmonOnboardingBullet(text: TokenmonL10n.string("onboarding.welcome.bullet.dex"))
-                    }
-                }
-            }
-
-            TokenmonCompactSection(
+            TokenmonOnboardingNoteStrip(
                 title: TokenmonL10n.string("onboarding.welcome.next_steps.title"),
-                systemImage: "list.bullet.clipboard"
-            ) {
-                Text(TokenmonL10n.string("onboarding.welcome.next_steps.body"))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+                systemImage: "switch.2",
+                detail: TokenmonL10n.string("onboarding.welcome.next_steps.body")
+            )
         }
     }
 }
 
-private struct TokenmonOnboardingPermissionsStep: View {
+private struct TokenmonOnboardingHeroCard: View {
+    let sceneContext: TokenmonSceneContext
+    let companionAssetKeys: [String]
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Color(nsColor: .controlBackgroundColor).opacity(0.95),
+                            Color.accentColor.opacity(0.10),
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .stroke(Color.accentColor.opacity(0.18), lineWidth: 1)
+                )
+
+            VStack(alignment: .leading, spacing: 14) {
+                Label(TokenmonL10n.string("onboarding.welcome.hero.title"), systemImage: "sparkles")
+                    .font(.headline)
+
+                Text(TokenmonL10n.string("onboarding.welcome.hero.body"))
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 8) {
+                    TokenmonOnboardingHeroBadge(
+                        title: TokenmonL10n.string("onboarding.welcome.hero.badge.passive"),
+                        systemImage: "leaf.fill"
+                    )
+                    TokenmonOnboardingHeroBadge(
+                        title: TokenmonL10n.string("onboarding.welcome.hero.badge.auto"),
+                        systemImage: "wand.and.stars.inverse"
+                    )
+                    TokenmonOnboardingHeroBadge(
+                        title: TokenmonL10n.string("onboarding.welcome.hero.badge.private"),
+                        systemImage: "lock.fill"
+                    )
+                }
+
+                TokenmonNowFieldHeroCard(
+                    sceneContext: sceneContext,
+                    companionAssetKeys: companionAssetKeys
+                )
+                .frame(maxWidth: 292, alignment: .leading)
+                .allowsHitTesting(false)
+
+                LazyVGrid(
+                    columns: [
+                        GridItem(.flexible(minimum: 0, maximum: .infinity), spacing: 10),
+                        GridItem(.flexible(minimum: 0, maximum: .infinity), spacing: 10),
+                    ],
+                    spacing: 10
+                ) {
+                    ForEach(TokenmonOnboardingBeat.allCases, id: \.self) { beat in
+                        TokenmonOnboardingBeatPanel(beat: beat)
+                    }
+                }
+            }
+            .padding(20)
+        }
+    }
+}
+
+private struct TokenmonOnboardingHeroBadge: View {
+    let title: String
+    let systemImage: String
+
+    var body: some View {
+        Label(title, systemImage: systemImage)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(Color(nsColor: .controlBackgroundColor).opacity(0.82))
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .stroke(Color.white.opacity(0.06), lineWidth: 1)
+            )
+    }
+}
+
+private struct TokenmonOnboardingBeatPanel: View {
+    let beat: TokenmonOnboardingBeat
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label {
+                Text(beat.title)
+                    .font(.caption.weight(.semibold))
+            } icon: {
+                Image(systemName: beat.systemImage)
+                    .foregroundStyle(Color.accentColor)
+            }
+
+            Text(beat.detail)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.black.opacity(0.08))
+        )
+    }
+}
+
+private struct TokenmonOnboardingSetupStep: View {
     let appSettings: AppSettings
     let launchAtLoginState: TokenmonLaunchAtLoginState
     let notificationAuthorizationState: TokenmonNotificationAuthorizationState
     let onPerformSetupAction: (TokenmonSetupRecommendationAction) -> Void
 
-    var body: some View {
-        TokenmonSettingsSectionCard(
-            title: TokenmonL10n.string("onboarding.permissions.section_title"),
-            systemImage: "switch.2"
-        ) {
-            VStack(alignment: .leading, spacing: 12) {
-                Text(TokenmonL10n.string("onboarding.permissions.body"))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                TokenmonSetupRecommendationList(
-                    items: TokenmonSetupRecommendationsBuilder.items(
-                        appSettings: appSettings,
-                        launchAtLoginState: launchAtLoginState,
-                        notificationAuthorizationState: notificationAuthorizationState
-                    ),
-                    onPerformAction: onPerformSetupAction
-                )
-
-                Text(TokenmonL10n.string("settings.general.quick_setup.note"))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
+    private var recommendationItems: [TokenmonSetupRecommendationItem] {
+        TokenmonSetupRecommendationsBuilder.items(
+            appSettings: appSettings,
+            launchAtLoginState: launchAtLoginState,
+            notificationAuthorizationState: notificationAuthorizationState
+        )
     }
-}
 
-private struct TokenmonOnboardingProvidersStep: View {
-    let onboardingStatuses: [TokenmonProviderOnboardingStatus]
-    let providerHealthSummaries: [ProviderHealthSummary]
+    private var setupCards: [TokenmonOnboardingSetupCardModel] {
+        [
+            launchSetupCard,
+            notificationSetupCard,
+        ]
+    }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            TokenmonProviderOverviewRow(
-                summary: TokenmonSettingsPresentationBuilder.providerOverviewSummary(
-                    onboardingStatuses: onboardingStatuses
-                )
+    private var launchSetupCard: TokenmonOnboardingSetupCardModel {
+        if launchAtLoginState.isSupported == false {
+            return TokenmonOnboardingSetupCardModel(
+                title: TokenmonL10n.string("settings.general.quick_setup.launch_title"),
+                systemImage: "power.circle.fill",
+                tint: .secondary,
+                status: TokenmonL10n.string("onboarding.setup.status.unavailable"),
+                detail: launchAtLoginState.reason,
+                actionTitle: nil,
+                action: nil
             )
+        }
 
-            ForEach(onboardingStatuses, id: \.provider) { status in
-                TokenmonOnboardingProviderSummaryCard(
-                    status: status,
-                    healthSummary: providerHealthSummaries.first(where: { $0.provider == status.provider })
+        if launchAtLoginState.isEnabled {
+            return TokenmonOnboardingSetupCardModel(
+                title: TokenmonL10n.string("settings.general.quick_setup.launch_title"),
+                systemImage: "power.circle.fill",
+                tint: .green,
+                status: TokenmonL10n.string("onboarding.setup.status.ready"),
+                detail: launchAtLoginState.reason,
+                actionTitle: launchAtLoginState.showsOpenSystemSettingsAction
+                    ? TokenmonL10n.string("settings.general.open_login_items_settings")
+                    : nil,
+                action: launchAtLoginState.showsOpenSystemSettingsAction ? .openLoginItemsSettings : nil
+            )
+        }
+
+        if launchAtLoginState.showsOpenSystemSettingsAction {
+            return TokenmonOnboardingSetupCardModel(
+                title: TokenmonL10n.string("settings.general.quick_setup.launch_title"),
+                systemImage: "power.circle.fill",
+                tint: .orange,
+                status: TokenmonL10n.string("onboarding.setup.status.attention"),
+                detail: launchAtLoginState.reason,
+                actionTitle: TokenmonL10n.string("settings.general.open_login_items_settings"),
+                action: .openLoginItemsSettings
+            )
+        }
+
+        return TokenmonOnboardingSetupCardModel(
+            title: TokenmonL10n.string("settings.general.quick_setup.launch_title"),
+            systemImage: "power.circle.fill",
+            tint: .accentColor,
+            status: TokenmonL10n.string("onboarding.setup.status.optional"),
+            detail: launchAtLoginState.reason,
+            actionTitle: TokenmonL10n.string("settings.general.quick_setup.action.enable_launch_at_login"),
+            action: .enableLaunchAtLogin
+        )
+    }
+
+    private var notificationSetupCard: TokenmonOnboardingSetupCardModel {
+        if appSettings.notificationsEnabled == false {
+            return TokenmonOnboardingSetupCardModel(
+                title: TokenmonL10n.string("settings.general.quick_setup.notifications_title"),
+                systemImage: "bell.badge.fill",
+                tint: .accentColor,
+                status: TokenmonL10n.string("onboarding.setup.status.optional"),
+                detail: TokenmonL10n.string("onboarding.setup.notifications.optional"),
+                actionTitle: TokenmonL10n.string("settings.general.quick_setup.action.enable_capture_notifications"),
+                action: .enableCaptureNotifications
+            )
+        }
+
+        switch notificationAuthorizationState {
+        case .authorized(let alertsEnabled, _, _):
+            if alertsEnabled {
+                return TokenmonOnboardingSetupCardModel(
+                    title: TokenmonL10n.string("settings.general.quick_setup.notifications_title"),
+                    systemImage: "bell.badge.fill",
+                    tint: .green,
+                    status: TokenmonL10n.string("onboarding.setup.status.ready"),
+                    detail: TokenmonL10n.string("onboarding.setup.notifications.ready"),
+                    actionTitle: nil,
+                    action: nil
                 )
             }
 
-            Text(TokenmonL10n.string("onboarding.providers.note"))
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            return TokenmonOnboardingSetupCardModel(
+                title: TokenmonL10n.string("settings.general.quick_setup.notifications_title"),
+                systemImage: "bell.badge.fill",
+                tint: .orange,
+                status: TokenmonL10n.string("onboarding.setup.status.attention"),
+                detail: TokenmonSetupRecommendationsBuilder.notificationAuthorizationDetail(notificationAuthorizationState),
+                actionTitle: TokenmonL10n.string("settings.general.open_notification_settings"),
+                action: .openNotificationSettings
+            )
+        case .denied:
+            return TokenmonOnboardingSetupCardModel(
+                title: TokenmonL10n.string("settings.general.quick_setup.notifications_title"),
+                systemImage: "bell.badge.fill",
+                tint: .orange,
+                status: TokenmonL10n.string("onboarding.setup.status.attention"),
+                detail: TokenmonSetupRecommendationsBuilder.notificationAuthorizationDetail(notificationAuthorizationState),
+                actionTitle: TokenmonL10n.string("settings.general.open_notification_settings"),
+                action: .openNotificationSettings
+            )
+        case .notDetermined:
+            return TokenmonOnboardingSetupCardModel(
+                title: TokenmonL10n.string("settings.general.quick_setup.notifications_title"),
+                systemImage: "bell.badge.fill",
+                tint: .accentColor,
+                status: TokenmonL10n.string("onboarding.setup.status.optional"),
+                detail: TokenmonSetupRecommendationsBuilder.notificationAuthorizationDetail(notificationAuthorizationState),
+                actionTitle: TokenmonL10n.string("settings.general.quick_setup.action.request_notification_permission"),
+                action: .requestCaptureNotificationPermission
+            )
+        case .unknown:
+            return TokenmonOnboardingSetupCardModel(
+                title: TokenmonL10n.string("settings.general.quick_setup.notifications_title"),
+                systemImage: "bell.badge.fill",
+                tint: .secondary,
+                status: TokenmonL10n.string("onboarding.setup.status.checking"),
+                detail: TokenmonSetupRecommendationsBuilder.notificationAuthorizationDetail(notificationAuthorizationState),
+                actionTitle: nil,
+                action: nil
+            )
         }
     }
-}
-
-private struct TokenmonOnboardingProviderSummaryCard: View {
-    let status: TokenmonProviderOnboardingStatus
-    let healthSummary: ProviderHealthSummary?
 
     var body: some View {
-        TokenmonSettingsSectionCard(
-            title: status.provider.displayName,
-            systemImage: providerSystemImage
-        ) {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .top, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(status.title)
-                            .font(.headline)
-                        Text(status.detail)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 12) {
+                Label(TokenmonL10n.string("onboarding.setup.section_title"), systemImage: "switch.2")
+                    .font(.headline)
+
+                Text(TokenmonL10n.string("onboarding.setup.body"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 250), spacing: 12, alignment: .top)],
+                    alignment: .leading,
+                    spacing: 12
+                ) {
+                    ForEach(setupCards) { card in
+                        TokenmonOnboardingSetupFeatureCard(
+                            card: card,
+                            onPerformAction: onPerformSetupAction
+                        )
                     }
-
-                    Spacer()
-
-                    TokenmonOnboardingProviderStatusBadge(
-                        state: TokenmonSettingsPresentationBuilder.providerCardState(for: status)
-                    )
                 }
 
-                Text(
-                    TokenmonSettingsPresentationBuilder.providerMetadataLine(
-                        status: status,
-                        healthSummary: healthSummary
+                if recommendationItems.isEmpty == false {
+                    Text(TokenmonL10n.string("settings.general.quick_setup.note"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text(TokenmonL10n.string("settings.general.quick_setup.complete"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            TokenmonOnboardingNoteStrip(
+                title: TokenmonL10n.string("onboarding.setup.revisit.title"),
+                systemImage: "gearshape",
+                detail: TokenmonL10n.string("onboarding.setup.revisit.body")
+            )
+        }
+    }
+}
+
+private struct TokenmonOnboardingSetupCardModel: Identifiable {
+    let id = UUID()
+    let title: String
+    let systemImage: String
+    let tint: Color
+    let status: String
+    let detail: String
+    let actionTitle: String?
+    let action: TokenmonSetupRecommendationAction?
+}
+
+private struct TokenmonOnboardingSetupFeatureCard: View {
+    let card: TokenmonOnboardingSetupCardModel
+    let onPerformAction: (TokenmonSetupRecommendationAction) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: card.systemImage)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(card.tint)
+                    .frame(width: 30, height: 30)
+                    .background(
+                        Circle()
+                            .fill(card.tint.opacity(0.14))
                     )
-                )
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(card.title)
+                        .font(.subheadline.weight(.semibold))
+
+                    Text(card.status)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(card.tint)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(card.tint.opacity(0.12))
+                        )
+                }
+
+                Spacer(minLength: 0)
+            }
+
+            Text(card.detail)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Spacer(minLength: 0)
+
+            if let actionTitle = card.actionTitle,
+               let action = card.action {
+                Button(actionTitle) {
+                    onPerformAction(action)
+                }
+                .buttonStyle(.glassProminent)
+                .controlSize(.small)
             }
         }
-    }
-
-    private var providerSystemImage: String {
-        switch status.provider {
-        case .claude:
-            return "bubble.left.and.bubble.right"
-        case .codex:
-            return "terminal"
-        case .gemini:
-            return "antenna.radiowaves.left.and.right"
-        }
-    }
-}
-
-private struct TokenmonOnboardingProviderStatusBadge: View {
-    let state: TokenmonProviderCardState
-
-    var body: some View {
-        Label(title, systemImage: systemImage)
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(tint)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(
-                Capsule()
-                    .fill(tint.opacity(state == .notFound ? 0.10 : 0.16))
-            )
-    }
-
-    var title: String {
-        switch state {
-        case .connected:
-            return TokenmonL10n.string("provider.card_state.connected")
-        case .repair:
-            return TokenmonL10n.string("provider.card_state.repair")
-        case .needsSetup:
-            return TokenmonL10n.string("provider.card_state.needs_setup")
-        case .notFound:
-            return TokenmonL10n.string("provider.card_state.not_found")
-        }
-    }
-
-    var systemImage: String {
-        switch state {
-        case .connected:
-            return "checkmark.circle.fill"
-        case .repair:
-            return "wrench.and.screwdriver.fill"
-        case .needsSetup:
-            return "exclamationmark.circle.fill"
-        case .notFound:
-            return "magnifyingglass"
-        }
-    }
-
-    var tint: Color {
-        switch state {
-        case .connected:
-            return .green
-        case .repair:
-            return .orange
-        case .needsSetup:
-            return .accentColor
-        case .notFound:
-            return .secondary
-        }
+        .frame(maxWidth: .infinity, minHeight: 172, alignment: .topLeading)
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.56))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(card.tint.opacity(0.14), lineWidth: 1)
+        )
     }
 }
 
-private struct TokenmonOnboardingBullet: View {
-    let text: String
+private struct TokenmonOnboardingNoteStrip: View {
+    let title: String
+    let systemImage: String
+    let detail: String
 
-    var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "circle.fill")
-                .font(.system(size: 6))
-                .padding(.top, 6)
+    var bodyView: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: systemImage)
                 .foregroundStyle(.secondary)
+                .frame(width: 18)
 
-            Text(text)
-                .font(.subheadline)
-                .foregroundStyle(.primary)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.44))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.secondary.opacity(0.06), lineWidth: 1)
+        )
+    }
+
+    var body: some View {
+        bodyView
     }
 }
 

@@ -431,16 +431,14 @@ final class TokenmonAppController {
 
         let controller = TokenmonHostingWindowController(
             title: TokenmonL10n.string("window.title.welcome_guide"),
-            defaultSize: NSSize(width: 720, height: 620),
-            autosaveName: "TokenmonOnboardingWindow",
+            defaultSize: NSSize(width: 660, height: 560),
+            minSize: NSSize(width: 620, height: 500),
+            autosaveName: "TokenmonOnboardingWindowV2",
             rootView: AnyView(
                 TokenmonOnboardingPanel(
                     model: menuModel,
                     onPerformSetupAction: { [weak self] action in
                         self?.performOnboardingSetupAction(action)
-                    },
-                    onOpenProvidersSettings: { [weak self] in
-                        self?.showSettings(pane: .providers)
                     },
                     onSkip: { [weak self] in
                         self?.dismissOnboarding(reason: "skip")
@@ -1026,6 +1024,7 @@ final class TokenmonHostingWindowController: NSWindowController {
     init(
         title: String,
         defaultSize: NSSize,
+        minSize: NSSize? = nil,
         autosaveName: String,
         rootView: AnyView
     ) {
@@ -1034,7 +1033,7 @@ final class TokenmonHostingWindowController: NSWindowController {
         window.title = title
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.setContentSize(defaultSize)
-        window.minSize = defaultSize
+        window.minSize = minSize ?? defaultSize
         window.isReleasedWhenClosed = false
         window.tabbingMode = .disallowed
         window.setFrameAutosaveName(autosaveName)

@@ -1079,7 +1079,6 @@ final class TokenmonMenuModel: ObservableObject {
     var shouldAutoPresentOnboarding: Bool {
         !appSettings.firstRunSetupPromptShown
             && isLikelyFreshInstallForSetupPrompt
-            && shouldShowSetupRecommendations
     }
 
     var launchAtLoginState: TokenmonLaunchAtLoginState { diagnosticsSnapshot.launchAtLoginState }

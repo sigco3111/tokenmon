@@ -2764,6 +2764,14 @@ struct TokenmonPresentationTests {
     }
 
     @Test
+    func onboardingStepSequenceMatchesTwoStepFlow() {
+        #expect(TokenmonFirstRunOnboardingStep.allCases == [.welcome, .setup])
+        #expect(TokenmonFirstRunOnboardingStep.welcome.next == .setup)
+        #expect(TokenmonFirstRunOnboardingStep.setup.previous == .welcome)
+        #expect(TokenmonFirstRunOnboardingStep.setup.next == nil)
+    }
+
+    @Test
     func setupRecommendationsPreferExplicitEnableActions() {
         let items = TokenmonSetupRecommendationsBuilder.items(
             appSettings: AppSettings(notificationsEnabled: false),
@@ -2809,7 +2817,22 @@ struct TokenmonPresentationTests {
     }
 
     @Test
-    func firstRunSetupPromptSkipsWorkspaceOnlyLaunchStateWhenNotificationsAreConfigured() async throws {
+    func setupRecommendationsAreEmptyWhenLaunchAndNotificationsAlreadyLookGood() {
+        let items = TokenmonSetupRecommendationsBuilder.items(
+            appSettings: AppSettings(notificationsEnabled: true),
+            launchAtLoginState: TokenmonLaunchAtLoginState(
+                isSupported: true,
+                isEnabled: true,
+                reason: TokenmonL10n.string("settings.launch_at_login.reason.enabled")
+            ),
+            notificationAuthorizationState: .authorized(alertsEnabled: true, soundsEnabled: true, alertStyle: 1)
+        )
+
+        #expect(items.isEmpty)
+    }
+
+    @Test
+    func firstRunOnboardingStillAutoPresentsWhenSetupAlreadyLooksConfigured() async throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
 
@@ -2835,7 +2858,7 @@ struct TokenmonPresentationTests {
 
         await model.waitForRefreshToFinish()
         #expect(!model.shouldShowSetupRecommendations)
-        #expect(!model.shouldAutoPresentOnboarding)
+        #expect(model.shouldAutoPresentOnboarding)
     }
 
     @Test

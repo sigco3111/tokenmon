@@ -23,6 +23,7 @@ env:
 
 jobs:
   verify-release:
+    if: ${{ github.repository == 'aroido/tokenmon' }}
     runs-on: macos-26
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
@@ -63,6 +64,7 @@ jobs:
         run: ./scripts/ai-verify --mode pr
 
   build-macos-release:
+    if: ${{ github.repository == 'aroido/tokenmon' }}
     needs: verify-release
     runs-on: macos-26
     env:
