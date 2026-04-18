@@ -343,7 +343,12 @@ struct TokenmonAppUpdaterAvailability: Equatable {
 }
 
 @MainActor
-final class TokenmonAppUpdater: NSObject, ObservableObject {
+protocol TokenmonAppUpdaterStarting: AnyObject {
+    func start()
+}
+
+@MainActor
+final class TokenmonAppUpdater: NSObject, ObservableObject, TokenmonAppUpdaterStarting {
     @Published private(set) var canCheckForUpdates = false
 
     let diagnosticsSnapshot: TokenmonAppUpdaterDiagnosticsSnapshot
@@ -353,11 +358,13 @@ final class TokenmonAppUpdater: NSObject, ObservableObject {
     private let notificationBridge: TokenmonAppUpdateNotificationBridge
     private var updaterController: SPUStandardUpdaterController?
     private var canCheckObservation: NSKeyValueObservation?
+    private var updaterStarted = false
 
     init(
         settingsProvider: @escaping @MainActor () -> AppSettings = { AppSettings() },
         notificationCoordinator: TokenmonCaptureNotificationCoordinating = TokenmonNoopCaptureNotificationCoordinator(),
-        analyticsTracker: TokenmonAnalyticsTracking = TokenmonNoopAnalyticsTracker()
+        analyticsTracker: TokenmonAnalyticsTracking = TokenmonNoopAnalyticsTracker(),
+        startImmediately: Bool = true
     ) {
         let diagnosticsSnapshot = TokenmonAppUpdaterDiagnosticsSnapshot.resolve()
         self.diagnosticsSnapshot = diagnosticsSnapshot
@@ -378,10 +385,11 @@ final class TokenmonAppUpdater: NSObject, ObservableObject {
         switch availability {
         case .available:
             updaterController = SPUStandardUpdaterController(
-                startingUpdater: true,
+                startingUpdater: startImmediately,
                 updaterDelegate: self,
                 userDriverDelegate: nil
             )
+            updaterStarted = startImmediately
         case .unavailable:
             updaterController = nil
         }
@@ -397,6 +405,16 @@ final class TokenmonAppUpdater: NSObject, ObservableObject {
 
     deinit {
         canCheckObservation?.invalidate()
+    }
+
+    func start() {
+        guard updaterStarted == false, let updaterController else {
+            return
+        }
+
+        updaterController.startUpdater()
+        updaterStarted = true
+        canCheckForUpdates = updaterController.updater.canCheckForUpdates
     }
 
     var isAvailable: Bool {

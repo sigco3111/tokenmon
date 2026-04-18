@@ -196,10 +196,99 @@ struct TokenmonUpdaterTests {
         #expect(coordinator.updateNotificationVersions.isEmpty)
     }
 
+    @Test
+    @MainActor
+    func startupServicesStartNotificationCoordinatorBeforeAppUpdater() {
+        let trace = StartupTrace()
+        let coordinator = StartupNotificationCoordinatorSpy(trace: trace)
+        let updater = StartupUpdaterSpy(trace: trace)
+
+        TokenmonAppStartupServices.startNotificationAwareUpdateServices(
+            notificationCoordinator: coordinator,
+            appUpdater: updater
+        )
+
+        #expect(trace.events == ["notifications", "updater"])
+    }
+
     private func temporaryDatabasePath() -> String {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("TokenmonUpdaterTests-\(UUID().uuidString)", isDirectory: true)
         return directory.appendingPathComponent("tokenmon.sqlite").path
+    }
+
+    @MainActor
+    private final class StartupTrace {
+        var events: [String] = []
+    }
+
+    @MainActor
+    private final class StartupNotificationCoordinatorSpy: TokenmonCaptureNotificationCoordinating {
+        private let trace: StartupTrace
+
+        init(trace: StartupTrace) {
+            self.trace = trace
+        }
+
+        func start() {
+            trace.events.append("notifications")
+        }
+
+        func fetchAuthorizationState(
+            completion: @escaping @MainActor (TokenmonNotificationAuthorizationState) -> Void
+        ) {
+            completion(.unknown)
+        }
+
+        func runtimeDidRefresh(
+            from _: TokenmonRuntimeSnapshot,
+            to _: TokenmonRuntimeSnapshot,
+            settings _: AppSettings
+        ) {}
+
+        func sendPreviewCaptureNotification(
+            speciesID _: String,
+            assetKey _: String,
+            speciesName _: String,
+            subtitle _: String,
+            completion: @escaping @MainActor (String?, String?) -> Void
+        ) {
+            completion(nil, nil)
+        }
+
+        func notificationsPreferenceDidChange(
+            isEnabled _: Bool,
+            completion: @escaping @MainActor (String?, String?) -> Void
+        ) {
+            completion(nil, nil)
+        }
+
+        func updateNotificationsPreferenceDidChange(
+            isEnabled _: Bool,
+            completion: @escaping @MainActor (String?, String?) -> Void
+        ) {
+            completion(nil, nil)
+        }
+
+        func sendUpdateAvailableNotification(
+            version _: String,
+            completion: (@MainActor @Sendable (Bool) -> Void)?
+        ) {
+            completion?(false)
+        }
+    }
+
+    @MainActor
+    private final class StartupUpdaterSpy: TokenmonAppUpdaterStarting {
+        private let trace: StartupTrace
+
+        init(trace: StartupTrace) {
+            self.trace = trace
+        }
+
+        func start() {
+            trace.events.append("updater")
+        }
     }
 
     @MainActor
