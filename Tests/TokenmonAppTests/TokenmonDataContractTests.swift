@@ -1120,6 +1120,14 @@ struct TokenmonDataContractTests {
     }
 
     @Test
+    func providerCodeIncludesCursorWithExpectedMetadata() {
+        #expect(ProviderCode.allCases.contains(.cursor))
+        #expect(ProviderCode(rawValue: "cursor") == .cursor)
+        #expect(ProviderCode.cursor.displayName == "Cursor")
+        #expect(ProviderCode.cursor.defaultSupportLevel == "managed_only")
+    }
+
+    @Test
     func migrationVersionSixSeedsGeminiProviderRow() throws {
         let tempDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("tokenmon-mig-v6-\(UUID().uuidString)", isDirectory: true)
@@ -1595,6 +1603,33 @@ struct TokenmonDataContractTests {
         #expect(decoded.totalOutputTokens == 567)
         #expect(decoded.normalizedTotalTokens == 1801)
         #expect(decoded.modelSlug == "gemini-2.5-pro")
+    }
+
+    @Test
+    func cursorUsageCSVAdapterBuildsCumulativeProviderEvents() throws {
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tokenmon-cursor-csv-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let csvPath = tempDirectory.appendingPathComponent("cursor.csv")
+        try """
+        Date,Cloud Agent ID,Automation ID,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost
+        2026-04-18T01:00:00Z,agent-alpha,,agent,gpt-5.4,auto,1400,1000,250,400,2050,$0.12
+        2026-04-18T01:05:00Z,agent-alpha,,agent,gpt-5.4,auto,1600,1200,300,500,2800,$0.16
+        """.write(to: csvPath, atomically: true, encoding: .utf8)
+
+        let events = try CursorUsageCSVAdapter.providerEvents(from: csvPath.path)
+
+        #expect(events.count == 2)
+        #expect(events[0].provider == .cursor)
+        #expect(events[0].sourceMode == "cursor_usage_export_api")
+        #expect(events[0].providerSessionID == "cloud-agent:agent-alpha")
+        #expect(events[0].normalizedTotalTokens == 2050)
+        #expect(events[1].providerSessionID == "cloud-agent:agent-alpha")
+        #expect(events[1].normalizedTotalTokens == 4850)
+        #expect(events[1].rawReference.kind == "cursor_usage_csv")
+        #expect(events[1].sessionOriginHint == .startedDuringLiveRuntime)
     }
 
     private static func makeStringAttr(

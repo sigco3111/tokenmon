@@ -927,42 +927,16 @@ final class TokenmonMenuModel: ObservableObject {
     }
 
     func syncCursorUsage() {
-        guard cursorSyncAvailable else {
-            settingsError = "Cursor sync script is not available from this Tokenmon build"
-            settingsMessage = nil
-            refresh(reason: .manual)
-            return
-        }
-
-        settingsMessage = TokenmonL10n.string("settings.feedback.cursor_sync_started")
-        settingsError = nil
-
-        let databasePath = self.databasePath
-        let artifactsPath = self.cursorSyncArtifactsPath
-        let executablePath = self.executablePath
-
         Task { [weak self] in
             guard let self else {
                 return
             }
-
-            do {
-                let output = try await Task.detached(priority: .userInitiated) {
-                    try Self.runCursorSyncProcess(
-                        databasePath: databasePath,
-                        artifactsPath: artifactsPath,
-                        executablePath: executablePath
-                    )
-                }.value
-                settingsMessage = Self.cursorSyncMessage(from: output)
-                settingsError = nil
-            } catch {
-                settingsError = error.localizedDescription
-                settingsMessage = nil
-            }
-
-            refresh(reason: .manual)
+            await performCursorUsageSync(.manual)
         }
+    }
+
+    func syncCursorUsageInBackground() async {
+        await performCursorUsageSync(.background)
     }
 
     func runTranscriptBackfill(
@@ -1611,7 +1585,74 @@ private enum TokenmonCursorSyncError: Error, LocalizedError {
     }
 }
 
+private enum TokenmonCursorSyncPresentation {
+    case manual
+    case background
+}
+
 private extension TokenmonMenuModel {
+    @MainActor
+    func performCursorUsageSync(_ presentation: TokenmonCursorSyncPresentation) async {
+        guard cursorSyncAvailable else {
+            if presentation == .manual {
+                settingsError = "Cursor sync script is not available from this Tokenmon build"
+                settingsMessage = nil
+                refresh(reason: .manual)
+            }
+            return
+        }
+
+        if presentation == .manual {
+            settingsMessage = TokenmonL10n.string("settings.feedback.cursor_sync_started")
+            settingsError = nil
+        }
+
+        let databasePath = self.databasePath
+        let artifactsPath = self.cursorSyncArtifactsPath
+        let executablePath = self.executablePath
+
+        do {
+            let output = try await Task.detached(priority: .userInitiated) {
+                try Self.runCursorSyncProcess(
+                    databasePath: databasePath,
+                    artifactsPath: artifactsPath,
+                    executablePath: executablePath
+                )
+            }.value
+
+            let acceptedCount = Int(Self.syncOutputValue(for: "accepted", in: output) ?? "0") ?? 0
+
+            if acceptedCount > 0 {
+                recordLiveActivityPulse()
+            }
+
+            switch presentation {
+            case .manual:
+                settingsMessage = Self.cursorSyncMessage(from: output)
+                settingsError = nil
+                refresh(reason: .manual)
+            case .background:
+                if acceptedCount > 0 {
+                    refresh(reason: .manual)
+                }
+            }
+        } catch {
+            switch presentation {
+            case .manual:
+                settingsError = error.localizedDescription
+                settingsMessage = nil
+                refresh(reason: .manual)
+            case .background:
+                TokenmonAppBehaviorLogger.debug(
+                    category: "providers",
+                    event: "cursor_background_sync_failed",
+                    metadata: ["error": error.localizedDescription],
+                    supportDirectoryPath: supportDirectoryPath
+                )
+            }
+        }
+    }
+
     nonisolated static func runCursorSyncProcess(
         databasePath: String,
         artifactsPath: String,
