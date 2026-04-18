@@ -7,6 +7,17 @@ import TokenmonPersistence
 import TokenmonProviders
 
 @MainActor
+enum TokenmonAppStartupServices {
+    static func startNotificationAwareUpdateServices(
+        notificationCoordinator: TokenmonCaptureNotificationCoordinating,
+        appUpdater: TokenmonAppUpdaterStarting
+    ) {
+        notificationCoordinator.start()
+        appUpdater.start()
+    }
+}
+
+@MainActor
 final class TokenmonSceneDebugController: ObservableObject {
     struct StatusOffsetTuning: Equatable, Sendable {
         var x: Double = 0
@@ -137,7 +148,8 @@ final class TokenmonAppController {
         let appUpdater = TokenmonAppUpdater(
             settingsProvider: { menuModel.appSettings },
             notificationCoordinator: notificationCoordinator,
-            analyticsTracker: analyticsTracker
+            analyticsTracker: analyticsTracker,
+            startImmediately: false
         )
 
         captureNotificationCoordinator = notificationCoordinator
@@ -174,12 +186,24 @@ final class TokenmonAppController {
             ],
             supportDirectoryPath: menuModel.supportDirectoryPath
         )
-        captureNotificationCoordinator.start()
+        TokenmonAppStartupServices.startNotificationAwareUpdateServices(
+            notificationCoordinator: captureNotificationCoordinator,
+            appUpdater: appUpdater
+        )
         TokenmonAppBehaviorLogger.debug(
             category: "startup",
             event: "startup_phase_completed",
             metadata: [
                 "phase": "notification_coordinator_started",
+                "duration_ms": TokenmonAppBehaviorLogger.durationMillisecondsString(since: startupStartedAt),
+            ],
+            supportDirectoryPath: menuModel.supportDirectoryPath
+        )
+        TokenmonAppBehaviorLogger.debug(
+            category: "startup",
+            event: "startup_phase_completed",
+            metadata: [
+                "phase": "app_updater_started",
                 "duration_ms": TokenmonAppBehaviorLogger.durationMillisecondsString(since: startupStartedAt),
             ],
             supportDirectoryPath: menuModel.supportDirectoryPath

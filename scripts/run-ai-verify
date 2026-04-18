@@ -1480,6 +1480,8 @@ release_bundle_identifier="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifi
 [[ "$release_bundle_identifier" == "com.aroido.tokenmon" ]] || { printf 'VERIFY FAIL: release build should set CFBundleIdentifier=com.aroido.tokenmon\n' >&2; exit 1; }
 release_feed_url="$(/usr/libexec/PlistBuddy -c 'Print :SUFeedURL' "$release_dir/Tokenmon.app/Contents/Info.plist" 2>/dev/null || true)"
 [[ "$release_feed_url" == "$public_release_feed_url" ]] || { printf 'VERIFY FAIL: release build should set the Sparkle feed URL\n' >&2; exit 1; }
+release_check_interval="$(/usr/libexec/PlistBuddy -c 'Print :SUScheduledCheckInterval' "$release_dir/Tokenmon.app/Contents/Info.plist" 2>/dev/null || true)"
+[[ "$release_check_interval" == "3600" ]] || { printf 'VERIFY FAIL: release build should set SUScheduledCheckInterval=3600\n' >&2; exit 1; }
 release_public_key="$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$release_dir/Tokenmon.app/Contents/Info.plist" 2>/dev/null || true)"
 [[ "$release_public_key" == "$sparkle_public_key" ]] || { printf 'VERIFY FAIL: release build should embed the Sparkle public key\n' >&2; exit 1; }
 release_app_smoke_output="$("$release_dir/Tokenmon.app/Contents/MacOS/TokenmonApp" --smoke-test --db "$db" 2>&1)"
