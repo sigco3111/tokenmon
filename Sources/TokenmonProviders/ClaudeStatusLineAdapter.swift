@@ -9,6 +9,27 @@ public struct ClaudeStatusLineModel: Decodable, Sendable {
         case id
         case displayName = "display_name"
     }
+
+    public init(id: String?, displayName: String?) {
+        self.id = id
+        self.displayName = displayName
+    }
+
+    // Claude Code emits `model` either as an object (`{id, display_name}`,
+    // e.g. the statusline payload) or as a bare slug string (e.g. the
+    // SessionStart hook payload, which sends `"model": "claude-opus-4-7[1m]"`).
+    // Decode both shapes so neither call site rejects the payload.
+    public init(from decoder: Decoder) throws {
+        if let single = try? decoder.singleValueContainer(),
+           let slug = try? single.decode(String.self) {
+            self.id = slug
+            self.displayName = nil
+            return
+        }
+        let keyed = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try keyed.decodeIfPresent(String.self, forKey: .id)
+        self.displayName = try keyed.decodeIfPresent(String.self, forKey: .displayName)
+    }
 }
 
 public struct ClaudeStatusLineWorkspace: Decodable, Sendable {

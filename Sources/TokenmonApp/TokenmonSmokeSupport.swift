@@ -336,7 +336,7 @@ enum TokenmonActualPopoverScreenshotRenderer {
         let outputURL = URL(fileURLWithPath: outputDirectory).appendingPathComponent(fileName)
         try captureHostedWindowRootView(
             actualPopoverRootView(model: model),
-            size: NSSize(width: 360, height: 480),
+            size: NSSize(width: TokenmonPopoverContainer.width, height: TokenmonPopoverContainer.height),
             to: outputURL
         )
 
@@ -994,7 +994,7 @@ private func actualPopoverRootView(model: TokenmonMenuModel) -> AnyView {
                 selectSpecies: { _ in }
             )
         )
-        .frame(width: 360, height: 480, alignment: .topLeading)
+        .frame(width: TokenmonPopoverContainer.width, height: TokenmonPopoverContainer.height, alignment: .topLeading)
         .tokenmonPreferredColorScheme(model.appSettings.appearancePreference)
         .background(Color(nsColor: .windowBackgroundColor))
     )
@@ -1017,7 +1017,7 @@ private func actualPopoverRootView(
             ),
             initialActiveTab: initialActiveTab
         )
-        .frame(width: 360, height: 480, alignment: .topLeading)
+        .frame(width: TokenmonPopoverContainer.width, height: TokenmonPopoverContainer.height, alignment: .topLeading)
         .tokenmonPreferredColorScheme(model.appSettings.appearancePreference)
         .background(Color(nsColor: .windowBackgroundColor))
     )
@@ -1039,7 +1039,7 @@ private func captureReadmePopoverScreenshots(
 
         try captureHostedWindowRootView(
             actualPopoverRootView(model: model, initialActiveTab: output.tab),
-            size: NSSize(width: 360, height: 480),
+            size: NSSize(width: TokenmonPopoverContainer.width, height: TokenmonPopoverContainer.height),
             captureWholeWindow: true,
             styleMask: [.borderless],
             to: output.url

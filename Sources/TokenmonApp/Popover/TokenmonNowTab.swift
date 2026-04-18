@@ -263,7 +263,14 @@ struct TokenmonNowTab: View {
     }
 
     private var providerActionChips: some View {
-        HStack(spacing: 8) {
+        LazyVGrid(
+            columns: [
+                GridItem(.flexible(minimum: 0, maximum: .infinity), spacing: 8),
+                GridItem(.flexible(minimum: 0, maximum: .infinity), spacing: 8),
+            ],
+            alignment: .leading,
+            spacing: 8
+        ) {
             ForEach(ProviderCode.allCases, id: \.self) { provider in
                 let health = model.providerHealthSummaries.first { $0.provider == provider }
                 let onboarding = model.onboardingStatuses.first { $0.provider == provider }
@@ -274,7 +281,6 @@ struct TokenmonNowTab: View {
                     onOpenSettings: onOpenProviderSettings
                 )
             }
-            Spacer(minLength: 0)
         }
     }
 
@@ -332,8 +338,11 @@ private struct TokenmonProviderStatusChip: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.9)
+                    .minimumScaleFactor(0.95)
+
+                Spacer(minLength: 0)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
             .background(
@@ -351,7 +360,7 @@ private struct TokenmonProviderStatusChip: View {
     }
 
     private var presentationModel: Presentation {
-        if let installed = cliInstalled, !installed {
+        if provider != .cursor, let installed = cliInstalled, !installed {
             return Presentation(tint: .secondary, accessibilityState: TokenmonL10n.string("provider.status.not_installed"))
         }
 
@@ -435,6 +444,8 @@ private extension ProviderCode {
             return "Codex"
         case .gemini:
             return "Gemini"
+        case .cursor:
+            return "Cursor"
         }
     }
 }

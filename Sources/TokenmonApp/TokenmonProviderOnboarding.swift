@@ -54,6 +54,8 @@ enum TokenmonProviderOnboarding {
                 )
             case .gemini:
                 return inspectGemini(preferences: preferences)
+            case .cursor:
+                return inspectCursor(databasePath: databasePath, preferences: preferences)
             }
         }
     }
@@ -83,6 +85,11 @@ enum TokenmonProviderOnboarding {
                 executablePath: executablePath,
                 preferences: preferences
             )
+        case .cursor:
+            return TokenmonProviderInstallResult(
+                provider: .cursor,
+                message: "Cursor sync is managed through scripts/cursor-usage-prototype"
+            )
         }
     }
 
@@ -92,6 +99,14 @@ enum TokenmonProviderOnboarding {
         preferences: ProviderInstallationPreferences
     ) -> [TokenmonProviderAutoSetupResult] {
         ProviderCode.allCases.map { provider in
+            if provider == .cursor {
+                return TokenmonProviderAutoSetupResult(
+                    provider: provider,
+                    configured: false,
+                    message: TokenmonL10n.string("provider.cursor.sync.detail"),
+                    error: nil
+                )
+            }
             let discovery = TokenmonProviderDiscovery.discover(provider: provider, preferences: preferences)
             guard discovery.executableExists else {
                 return TokenmonProviderAutoSetupResult(
@@ -188,6 +203,39 @@ enum TokenmonProviderOnboarding {
             configurationSource: discovery.configurationSource,
             usesCustomExecutablePath: discovery.usesCustomExecutablePath,
             usesCustomConfigurationPath: discovery.usesCustomConfigurationPath,
+            codexMode: nil
+        )
+    }
+
+    private static func inspectCursor(
+        databasePath: String,
+        preferences: ProviderInstallationPreferences
+    ) -> TokenmonProviderOnboardingStatus {
+        let discovery = TokenmonProviderDiscovery.discover(provider: .cursor, preferences: preferences)
+        let healthSummary = try? TokenmonDatabaseManager(path: databasePath)
+            .providerHealthSummaries()
+            .first(where: { $0.provider == .cursor })
+        let isConnected = healthSummary?.healthState == "active" || healthSummary?.healthState == "connected"
+        return TokenmonProviderOnboardingStatus(
+            provider: .cursor,
+            cliInstalled: discovery.executableExists,
+            isConnected: isConnected,
+            isPartial: true,
+            title: TokenmonL10n.string(
+                isConnected ? "provider.cursor.connected.title" : "provider.cursor.sync.title"
+            ),
+            detail: TokenmonL10n.string(
+                isConnected ? "provider.cursor.connected.detail" : "provider.cursor.sync.detail"
+            ),
+            actionTitle: TokenmonL10n.string(
+                isConnected ? "provider.cursor.sync_again.action" : "provider.cursor.sync.action"
+            ),
+            executablePath: discovery.executablePath,
+            executableSource: discovery.executableSource,
+            configurationPath: discovery.configurationPath,
+            configurationSource: discovery.configurationSource,
+            usesCustomExecutablePath: false,
+            usesCustomConfigurationPath: false,
             codexMode: nil
         )
     }

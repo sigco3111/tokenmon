@@ -51,6 +51,8 @@ public struct ProviderInstallationPreferences: Equatable, Codable, Sendable {
             return codex
         case .gemini:
             return ProviderInstallationPathOverride()
+        case .cursor:
+            return ProviderInstallationPathOverride()
         }
     }
 
@@ -61,6 +63,8 @@ public struct ProviderInstallationPreferences: Equatable, Codable, Sendable {
         case .codex:
             codex.executablePath = path?.trimmedNilIfEmpty
         case .gemini:
+            break
+        case .cursor:
             break
         }
     }
@@ -73,6 +77,8 @@ public struct ProviderInstallationPreferences: Equatable, Codable, Sendable {
             codex.configurationPath = path?.trimmedNilIfEmpty
         case .gemini:
             break
+        case .cursor:
+            break
         }
     }
 
@@ -83,6 +89,8 @@ public struct ProviderInstallationPreferences: Equatable, Codable, Sendable {
         case .codex:
             codex = ProviderInstallationPathOverride()
         case .gemini:
+            break
+        case .cursor:
             break
         }
     }

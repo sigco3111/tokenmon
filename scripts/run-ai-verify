@@ -933,7 +933,7 @@ require_contains "$app_smoke_output" "seen_species: 0"
 require_contains "$app_smoke_output" "captured_species: 0"
 require_contains "$app_smoke_output" "notifications_enabled: false"
 require_contains "$app_smoke_output" "provider_status_visibility: true"
-require_contains "$app_smoke_output" "provider_status_entries_visible: 3"
+require_contains "$app_smoke_output" "provider_status_entries_visible: 4"
 require_contains "$app_smoke_output" "launch_at_login_supported: false"
 require_contains "$app_smoke_output" "latest_encounter: none"
 printf 'VERIFY PASS: menubar app empty-db smoke\n'
@@ -947,7 +947,7 @@ require_contains "$seed_rerun_output" "seeded species: total=151 inserted=0"
 printf 'VERIFY PASS: species seed rerun idempotency\n'
 
 summary_output="$(tokenmon_app_cmd --tokenmon-summary --db "$db" 2>&1)"
-require_contains "$summary_output" "providers: 3"
+require_contains "$summary_output" "providers: 4"
 require_contains "$summary_output" "species: 151"
 printf 'VERIFY PASS: summary after bootstrap/seed\n'
 
@@ -981,6 +981,11 @@ require_contains "$diagnose_empty_output" "live_gameplay_armed: yes"
 require_contains "$diagnose_empty_output" "[gemini]"
 require_contains "$diagnose_empty_output" "next_step: Tokenmon should configure Gemini automatically; repair Gemini if telemetry is still unavailable"
 require_contains "$diagnose_empty_output" "offline_dashboard_recovery: unavailable"
+require_contains "$diagnose_empty_output" "live_gameplay_armed: no"
+require_contains "$diagnose_empty_output" "[cursor]"
+require_contains "$diagnose_empty_output" "source_mode: cursor_usage_export_api"
+require_contains "$diagnose_empty_output" "next_step: Sync Cursor usage from Tokenmon to import the latest managed-only accounting data."
+require_contains "$diagnose_empty_output" "offline_dashboard_recovery: api_sync_supported"
 require_contains "$diagnose_empty_output" "live_gameplay_armed: no"
 require_contains "$diagnose_empty_output" "idle footprint"
 require_contains "$diagnose_empty_output" "menubar_refresh_mode: on-launch, inbox file-watch debounce, and manual refresh"
@@ -1359,6 +1364,43 @@ require_contains "$claude_diagnose_output" "[claude]"
 require_contains "$claude_diagnose_output" "source_mode: claude_statusline_live"
 require_contains "$claude_diagnose_output" "health_state: active"
 printf 'VERIFY PASS: diagnose claude statusline mode\n'
+
+cursor_usage_proto_dir="$tmpdir/cursor-usage-prototype"
+cursor_usage_proto_db="$tmpdir/cursor-usage-prototype.sqlite"
+tokenmon_app_cmd --tokenmon-db-init --db "$cursor_usage_proto_db" >/dev/null 2>&1
+cursor_usage_proto_output="$("$ROOT/scripts/cursor-usage-prototype" \
+  --csv-in Fixtures/CursorUsage/export-v3.csv \
+  --summary-in Fixtures/CursorUsage/usage-summary.json \
+  --artifact-dir "$cursor_usage_proto_dir" \
+  --db "$cursor_usage_proto_db" \
+  --tokenmon-app-bin "$tokenmon_app_bin" 2>&1)"
+require_contains "$cursor_usage_proto_output" "cursor usage prototype complete"
+require_contains "$cursor_usage_proto_output" "mode: fixture"
+require_contains "$cursor_usage_proto_output" "rows: 3"
+require_contains "$cursor_usage_proto_output" "models: 3"
+require_contains "$cursor_usage_proto_output" "cloud_agents: 1"
+require_contains "$cursor_usage_proto_output" "automations: 1"
+require_contains "$cursor_usage_proto_output" "tokenmon_ingest: ok"
+require_contains "$cursor_usage_proto_output" "accepted: 3"
+require_contains "$cursor_usage_proto_output" "usage_samples: 3"
+[[ -f "$cursor_usage_proto_dir/cursor-usage-export.csv" ]] || { printf 'VERIFY FAIL: missing cursor usage csv export artifact\n' >&2; exit 1; }
+[[ -f "$cursor_usage_proto_dir/cursor-usage-summary.json" ]] || { printf 'VERIFY FAIL: missing cursor usage summary artifact\n' >&2; exit 1; }
+[[ -f "$cursor_usage_proto_dir/cursor-usage-events.jsonl" ]] || { printf 'VERIFY FAIL: missing cursor usage events artifact\n' >&2; exit 1; }
+[[ -f "$cursor_usage_proto_dir/cursor-tokenmon-provider-events.ndjson" ]] || { printf 'VERIFY FAIL: missing cursor tokenmon provider events artifact\n' >&2; exit 1; }
+cursor_usage_summary_json="$(cat "$cursor_usage_proto_dir/cursor-usage-summary.json")"
+require_contains "$cursor_usage_summary_json" "\"billing_cycle_start\": \"2026-04-01T00:00:00Z\""
+require_contains "$cursor_usage_summary_json" "\"membership_type\": \"pro\""
+require_contains "$cursor_usage_summary_json" "\"total_tokens\": 4300"
+cursor_usage_events_jsonl="$(cat "$cursor_usage_proto_dir/cursor-usage-events.jsonl")"
+require_contains "$cursor_usage_events_jsonl" "\"model_slug\": \"gpt-5.4\""
+require_contains "$cursor_usage_events_jsonl" "\"kind\": \"automation\""
+cursor_tokenmon_events_jsonl="$(cat "$cursor_usage_proto_dir/cursor-tokenmon-provider-events.ndjson")"
+require_contains "$cursor_tokenmon_events_jsonl" "\"provider\":\"cursor\""
+require_contains "$cursor_tokenmon_events_jsonl" "\"source_mode\":\"cursor_usage_export_api\""
+cursor_usage_proto_summary="$(tokenmon_app_cmd --tokenmon-summary --db "$cursor_usage_proto_db" 2>&1)"
+require_contains "$cursor_usage_proto_summary" "provider_ingest_events: 3"
+require_contains "$cursor_usage_proto_summary" "usage_samples: 3"
+printf 'VERIFY PASS: cursor usage prototype fixture sync\n'
 record_timing "provider_fixtures" "provider_onboarding_and_backfill" "$provider_fixtures_started_at"
 
 release_bundle_started_at="$(timing_now)"

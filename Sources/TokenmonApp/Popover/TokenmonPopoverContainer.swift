@@ -10,6 +10,10 @@ struct TokenmonPopoverContainerActions {
 }
 
 struct TokenmonPopoverContainer: View {
+    static let width: CGFloat = 360
+    static let height: CGFloat = 520
+    static let contentWidth: CGFloat = 300
+
     @ObservedObject var model: TokenmonMenuModel
     let actions: TokenmonPopoverContainerActions
 
@@ -57,7 +61,7 @@ struct TokenmonPopoverContainer: View {
     var body: some View {
         HStack(spacing: 0) {
             content
-                .frame(width: 300, height: 480, alignment: .topLeading)
+                .frame(width: Self.contentWidth, height: Self.height, alignment: .topLeading)
 
             Divider()
 
@@ -70,7 +74,7 @@ struct TokenmonPopoverContainer: View {
                 )
             )
         }
-        .frame(width: 360, height: 480)
+        .frame(width: Self.width, height: Self.height)
         .onAppear {
             prewarmActiveTabIfNeeded()
         }

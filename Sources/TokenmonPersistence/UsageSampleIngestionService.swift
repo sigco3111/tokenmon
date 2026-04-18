@@ -196,6 +196,7 @@ public final class UsageSampleIngestionService {
 
             do {
                 try event.validate()
+                try databaseManager.ensureProviderRegistered(event.provider, database: database)
                 rawPayload = String(decoding: try encoder.encode(event), as: UTF8.self)
             } catch {
                 rejectedEvents += 1
@@ -342,6 +343,7 @@ public final class UsageSampleIngestionService {
         nextOffset: Int64,
         lineNumber: Int
     ) throws -> EventIngestionDisposition {
+        try databaseManager.ensureProviderRegistered(event.provider, database: database)
         if try fingerprintExists(database: database, fingerprint: event.providerEventFingerprint) {
             try updateIngestSource(
                 database: database,

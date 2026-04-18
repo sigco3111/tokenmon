@@ -997,33 +997,36 @@ public final class TokenmonDatabaseManager {
     }
 
     private func seedProviders(_ database: SQLiteDatabase) throws {
-        let now = ISO8601DateFormatter().string(from: Date())
-
         for provider in ProviderCode.allCases {
-            try database.execute(
-                """
-                INSERT INTO providers (
-                    provider_code,
-                    display_name,
-                    default_support_level,
-                    is_enabled,
-                    created_at,
-                    updated_at
-                ) VALUES (?, ?, ?, 1, ?, ?)
-                ON CONFLICT(provider_code) DO UPDATE SET
-                    display_name = excluded.display_name,
-                    default_support_level = excluded.default_support_level,
-                    updated_at = excluded.updated_at;
-                """,
-                bindings: [
-                    .text(provider.rawValue),
-                    .text(provider.displayName),
-                    .text(provider.defaultSupportLevel),
-                    .text(now),
-                    .text(now),
-                ]
-            )
+            try ensureProviderRegistered(provider, database: database)
         }
+    }
+
+    func ensureProviderRegistered(_ provider: ProviderCode, database: SQLiteDatabase) throws {
+        let now = ISO8601DateFormatter().string(from: Date())
+        try database.execute(
+            """
+            INSERT INTO providers (
+                provider_code,
+                display_name,
+                default_support_level,
+                is_enabled,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, ?, 1, ?, ?)
+            ON CONFLICT(provider_code) DO UPDATE SET
+                display_name = excluded.display_name,
+                default_support_level = excluded.default_support_level,
+                updated_at = excluded.updated_at;
+            """,
+            bindings: [
+                .text(provider.rawValue),
+                .text(provider.displayName),
+                .text(provider.defaultSupportLevel),
+                .text(now),
+                .text(now),
+            ]
+        )
     }
 
     private func ensureExplorationState(_ database: SQLiteDatabase) throws {

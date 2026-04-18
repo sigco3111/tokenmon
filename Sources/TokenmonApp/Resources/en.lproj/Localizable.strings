@@ -270,3 +270,13 @@
 "onboarding.setup.ready.body" = "Launch at login and capture alerts already look good here. You can change them any time from General settings.";
 "onboarding.setup.revisit.title" = "You can revisit this later";
 "onboarding.setup.revisit.body" = "General settings can reopen this guide whenever you want a quick refresher.";
+"provider.cursor.sync.title" = "Cursor sync available";
+"provider.cursor.sync.detail" = "Tokenmon can pull Cursor usage from the authenticated usage export API and import it as managed-only experimental accounting data.";
+"provider.cursor.sync.action" = "Sync Cursor Usage";
+"provider.cursor.sync_again.action" = "Sync Cursor Again";
+"provider.cursor.connected.title" = "Cursor synced";
+"provider.cursor.connected.detail" = "Recent Cursor usage has been imported into Tokenmon. Depending on the gameplay boundary, imported rows may remain accounting-only until live gameplay is armed.";
+"settings.providers.support.managed_only" = "Managed-only";
+"settings.providers.source_mode.cursor_usage_export_api" = "Usage export sync";
+"settings.providers.next_step.cursor_missing_configuration" = "Sync Cursor usage from Tokenmon to import the latest managed-only accounting data.";
+"settings.feedback.cursor_sync_started" = "Syncing Cursor usage into Tokenmon…";

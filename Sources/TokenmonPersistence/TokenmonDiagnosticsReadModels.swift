@@ -313,6 +313,12 @@ public extension TokenmonDatabaseManager {
                 "missing_configuration",
                 "Gemini observation is not configured yet"
             )
+        case .cursor:
+            return (
+                sourceMode ?? "cursor_usage_export_api",
+                "missing_configuration",
+                "Cursor usage export has not been imported yet"
+            )
         }
     }
 
@@ -324,6 +330,8 @@ public extension TokenmonDatabaseManager {
             return "automatic_supported"
         case .gemini:
             return "unavailable"
+        case .cursor:
+            return "api_sync_supported"
         }
     }
 
@@ -345,6 +353,8 @@ public extension TokenmonDatabaseManager {
                 && healthState != "unsupported"
                 && sourceMode != "claude_transcript_backfill"
         case .gemini:
+            return healthState != "missing_configuration" && healthState != "unsupported"
+        case .cursor:
             return healthState != "missing_configuration" && healthState != "unsupported"
         }
     }

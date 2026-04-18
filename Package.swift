@@ -71,6 +71,7 @@ let package = Package(
                 .process("Resources"),
                 .copy("../../assets/sprites"),
                 .copy("../../assets/backgrounds"),
+                .copy("../../scripts/cursor-usage-prototype"),
             ],
             linkerSettings: [
                 .unsafeFlags([
