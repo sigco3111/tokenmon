@@ -520,6 +520,11 @@ final class TokenmonMenuModel: ObservableObject {
 
     func connectProvider(_ provider: ProviderCode) {
         logInfo(category: "providers", event: "connect_provider_requested", metadata: ["provider": provider.rawValue])
+        if provider == .cursor {
+            selectedSettingsPane = .providers
+            syncCursorUsage()
+            return
+        }
         let onboardingStatus = providerInspector(databasePath, executablePath, providerInstallationPreferences)
             .first { $0.provider == provider }
         do {
@@ -921,6 +926,45 @@ final class TokenmonMenuModel: ObservableObject {
         }
     }
 
+    func syncCursorUsage() {
+        guard cursorSyncAvailable else {
+            settingsError = "Cursor sync script is not available from this Tokenmon build"
+            settingsMessage = nil
+            refresh(reason: .manual)
+            return
+        }
+
+        settingsMessage = TokenmonL10n.string("settings.feedback.cursor_sync_started")
+        settingsError = nil
+
+        let databasePath = self.databasePath
+        let artifactsPath = self.cursorSyncArtifactsPath
+        let executablePath = self.executablePath
+
+        Task { [weak self] in
+            guard let self else {
+                return
+            }
+
+            do {
+                let output = try await Task.detached(priority: .userInitiated) {
+                    try Self.runCursorSyncProcess(
+                        databasePath: databasePath,
+                        artifactsPath: artifactsPath,
+                        executablePath: executablePath
+                    )
+                }.value
+                settingsMessage = Self.cursorSyncMessage(from: output)
+                settingsError = nil
+            } catch {
+                settingsError = error.localizedDescription
+                settingsMessage = nil
+            }
+
+            refresh(reason: .manual)
+        }
+    }
+
     func runTranscriptBackfill(
         provider: ProviderCode,
         transcriptPath: String,
@@ -981,6 +1025,8 @@ final class TokenmonMenuModel: ObservableObject {
                 }
             case .gemini:
                 settingsMessage = TokenmonL10n.string("settings.feedback.gemini_backfill_unsupported")
+            case .cursor:
+                settingsMessage = "Cursor transcript backfill is not supported"
             }
             settingsError = nil
             refresh(reason: .manual)
@@ -1001,6 +1047,8 @@ final class TokenmonMenuModel: ObservableObject {
             return TokenmonL10n.string("settings.providers.next_step.codex_unsupported")
         case (.gemini, "missing_configuration"):
             return TokenmonL10n.string("settings.providers.next_step.gemini_missing_configuration")
+        case (.cursor, "missing_configuration"):
+            return TokenmonL10n.string("settings.providers.next_step.cursor_missing_configuration")
         case (_, "experimental"):
             return TokenmonL10n.string("settings.providers.next_step.experimental")
         case (_, "degraded"):
@@ -1101,6 +1149,16 @@ final class TokenmonMenuModel: ObservableObject {
 
     var supportDirectoryPath: String {
         TokenmonDatabaseManager.supportDirectory(forDatabasePath: databasePath)
+    }
+
+    var cursorSyncArtifactsPath: String {
+        URL(fileURLWithPath: supportDirectoryPath, isDirectory: true)
+            .appendingPathComponent("Developer/CursorSync", isDirectory: true)
+            .path
+    }
+
+    var cursorSyncAvailable: Bool {
+        Self.resolveCursorSyncScriptURL(executablePath: executablePath) != nil
     }
 
     var logsDirectoryPath: String {
@@ -1536,6 +1594,122 @@ private extension String {
     var nilIfEmpty: String? {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+private enum TokenmonCursorSyncError: Error, LocalizedError {
+    case scriptUnavailable
+    case executionFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .scriptUnavailable:
+            return "Cursor sync script is unavailable in the current repository context"
+        case .executionFailed(let message):
+            return message
+        }
+    }
+}
+
+private extension TokenmonMenuModel {
+    nonisolated static func runCursorSyncProcess(
+        databasePath: String,
+        artifactsPath: String,
+        executablePath: String
+    ) throws -> String {
+        guard let scriptURL = resolveCursorSyncScriptURL(executablePath: executablePath) else {
+            throw TokenmonCursorSyncError.scriptUnavailable
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = [
+            "python3",
+            scriptURL.path,
+            "--artifact-dir", artifactsPath,
+            "--db", databasePath,
+            "--tokenmon-app-bin", executablePath,
+        ]
+        process.currentDirectoryURL = scriptURL.deletingLastPathComponent().deletingLastPathComponent()
+
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+
+        try process.run()
+        process.waitUntilExit()
+
+        let stdout = String(
+            data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(),
+            encoding: .utf8
+        )?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let stderr = String(
+            data: stderrPipe.fileHandleForReading.readDataToEndOfFile(),
+            encoding: .utf8
+        )?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        guard process.terminationStatus == 0 else {
+            let detail = stderr.isEmpty ? stdout : stderr
+            throw TokenmonCursorSyncError.executionFailed(
+                detail.isEmpty ? "Cursor sync failed with status \(process.terminationStatus)" : detail
+            )
+        }
+
+        return stdout
+    }
+
+    nonisolated static func cursorSyncMessage(from output: String) -> String {
+        let accepted = syncOutputValue(for: "accepted", in: output) ?? "0"
+        let usageSamples = syncOutputValue(for: "usage_samples", in: output) ?? "0"
+        if let gameplayNote = syncOutputValue(for: "gameplay_note", in: output) {
+            return "Cursor sync complete: \(accepted) accepted, \(usageSamples) samples. \(gameplayNote)"
+        }
+        return "Cursor sync complete: \(accepted) accepted, \(usageSamples) samples."
+    }
+
+    nonisolated static func syncOutputValue(for key: String, in output: String) -> String? {
+        let prefix = "\(key): "
+        for line in output.split(separator: "\n") {
+            guard line.hasPrefix(prefix) else {
+                continue
+            }
+            return String(line.dropFirst(prefix.count))
+        }
+        return nil
+    }
+
+    nonisolated static func resolveCursorSyncScriptURL(executablePath: String) -> URL? {
+        let fm = FileManager.default
+        if let bundled = TokenmonAppResourceLocator.resourceURL(relativePath: "cursor-usage-prototype") {
+            return bundled
+        }
+        var candidates: [URL] = [URL(fileURLWithPath: fm.currentDirectoryPath, isDirectory: true)]
+        var cursor = URL(fileURLWithPath: executablePath, isDirectory: false).deletingLastPathComponent()
+        for _ in 0..<8 {
+            candidates.append(cursor)
+            cursor.deleteLastPathComponent()
+        }
+
+        var seen = Set<String>()
+        for candidate in candidates where seen.insert(candidate.path).inserted {
+            var current = candidate
+            for _ in 0..<10 {
+                let gitPath = current.appendingPathComponent(".git").path
+                if fm.fileExists(atPath: gitPath) {
+                    let scriptURL = current
+                        .appendingPathComponent("scripts", isDirectory: true)
+                        .appendingPathComponent("cursor-usage-prototype", isDirectory: false)
+                    if fm.isExecutableFile(atPath: scriptURL.path) {
+                        return scriptURL
+                    }
+                    break
+                }
+                current.deleteLastPathComponent()
+            }
+        }
+
+        return nil
     }
 }
 
@@ -2250,6 +2424,9 @@ final class TokenmonInboxMonitor: @unchecked Sendable {
                     continue
                 }
             case .gemini:
+                ProviderBackfillRequestQueue.removeRequest(at: pendingRequest.filePath)
+                continue
+            case .cursor:
                 ProviderBackfillRequestQueue.removeRequest(at: pendingRequest.filePath)
                 continue
             }

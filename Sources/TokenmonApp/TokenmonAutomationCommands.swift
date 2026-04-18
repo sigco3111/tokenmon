@@ -65,6 +65,9 @@ enum TokenmonAutomationCommand {
         if let sourcePath = optionValue("--tokenmon-provider-codex-exec-json-import", in: arguments) {
             return try runCodexExecJSONImport(sourcePath: sourcePath, arguments: arguments)
         }
+        if let sourcePath = optionValue("--tokenmon-provider-cursor-import-csv", in: arguments) {
+            return try runCursorUsageCSVImport(sourcePath: sourcePath, arguments: arguments)
+        }
         if let prompt = optionValue("--tokenmon-provider-codex-exec-json-run", in: arguments) {
             return try runCodexExecJSONRun(prompt: prompt, arguments: arguments)
         }
@@ -596,6 +599,8 @@ enum TokenmonAutomationCommand {
             ].joined(separator: "\n")
         case .gemini:
             throw AutomationError.invalidUsage("gemini transcript backfill is not yet supported")
+        case .cursor:
+            throw AutomationError.invalidUsage("cursor transcript backfill is not yet supported")
         }
     }
 
@@ -754,6 +759,23 @@ enum TokenmonAutomationCommand {
             )
         )
         return renderCodexExecJSONResult(action: "import", result: result)
+    }
+
+    private static func runCursorUsageCSVImport(sourcePath: String, arguments: [String]) throws -> String {
+        let outputPath = optionValue("--out", in: arguments)
+            ?? TokenmonDatabaseManager.inboxPath(provider: .cursor, databasePath: optionValue("--db", in: arguments))
+        let result = try CursorUsageCSVAdapter.importCSV(
+            from: sourcePath,
+            outputPath: outputPath
+        )
+
+        return [
+            "cursor usage csv import complete",
+            "source_path: \(result.sourcePath)",
+            "output_path: \(result.outputPath ?? "stdout")",
+            "lines_read: \(result.linesRead)",
+            "events_written: \(result.eventsWritten)",
+        ].joined(separator: "\n")
     }
 
     private static func runCodexExecJSONRun(prompt: String, arguments: [String]) throws -> String {
@@ -959,6 +981,8 @@ enum TokenmonAutomationCommand {
             return "Codex is watched automatically; inspect the local session store path if live updates are missing"
         case (.gemini, "missing_configuration"):
             return "Tokenmon should configure Gemini automatically; repair Gemini if telemetry is still unavailable"
+        case (.cursor, "missing_configuration"):
+            return "Sync Cursor usage from Tokenmon to import the latest managed-only accounting data."
         case (_, "experimental"):
             return "inspect transcript activity and repair the provider from the app"
         case (_, "degraded"):

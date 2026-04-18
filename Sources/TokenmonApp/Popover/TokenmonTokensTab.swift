@@ -79,6 +79,7 @@ struct TokenmonTokensTab: View {
         case .claude: return .orange
         case .codex: return .teal
         case .gemini: return .indigo
+        case .cursor: return .green
         }
     }
 
@@ -87,6 +88,7 @@ struct TokenmonTokensTab: View {
         case .claude: return "Claude"
         case .codex: return "Codex"
         case .gemini: return "Gemini"
+        case .cursor: return "Cursor"
         }
     }
 

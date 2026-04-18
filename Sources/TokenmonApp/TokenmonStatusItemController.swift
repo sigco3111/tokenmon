@@ -737,7 +737,10 @@ final class TokenmonStatusItemController: NSObject {
     func setPopoverRootView(_ rootView: AnyView) {
         popover.behavior = .transient
         popover.animates = false
-        popover.contentSize = NSSize(width: 360, height: 480)
+        popover.contentSize = NSSize(
+            width: TokenmonPopoverContainer.width,
+            height: TokenmonPopoverContainer.height
+        )
         popover.contentViewController = NSHostingController(rootView: rootView)
         TokenmonAppAppearanceController.syncHostWindow(popover.contentViewController?.view.window)
     }

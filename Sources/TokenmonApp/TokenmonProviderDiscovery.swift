@@ -134,6 +134,14 @@ enum TokenmonProviderDiscovery {
             return DiscoveredPath(path: shellPath, exists: true, source: .shellLookup)
         }
 
+        if executable == "cursor" {
+            for candidate in cursorAppExecutableCandidates() {
+                if FileManager.default.isExecutableFile(atPath: candidate) {
+                    return DiscoveredPath(path: candidate, exists: true, source: .commonLocation)
+                }
+            }
+        }
+
         return DiscoveredPath(path: nil, exists: false, source: .unavailable)
     }
 
@@ -165,6 +173,8 @@ enum TokenmonProviderDiscovery {
             return "codex"
         case .gemini:
             return "gemini"
+        case .cursor:
+            return "cursor"
         }
     }
 
@@ -176,6 +186,10 @@ enum TokenmonProviderDiscovery {
             return resolvedHomeDirectory().appendingPathComponent(".codex", isDirectory: true).path
         case .gemini:
             return resolvedHomeDirectory().appendingPathComponent(".gemini", isDirectory: true).path
+        case .cursor:
+            return resolvedHomeDirectory()
+                .appendingPathComponent("Library/Application Support/Cursor/User", isDirectory: true)
+                .path
         }
     }
 
@@ -250,6 +264,20 @@ enum TokenmonProviderDiscovery {
 
     private static func shellEscape(_ value: String) -> String {
         "'\(value.replacingOccurrences(of: "'", with: "'\"'\"'"))'"
+    }
+
+    private static func cursorAppExecutableCandidates() -> [String] {
+        let home = resolvedHomeDirectory()
+        let appRoots = [
+            "/Applications/Cursor.app",
+            home.appendingPathComponent("Applications/Cursor.app", isDirectory: true).path,
+        ]
+
+        return appRoots.map {
+            URL(fileURLWithPath: $0, isDirectory: true)
+                .appendingPathComponent("Contents/MacOS/Cursor")
+                .path
+        }
     }
 }
 

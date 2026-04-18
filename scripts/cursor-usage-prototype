@@ -1,0 +1,518 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+import base64
+import csv
+import hashlib
+import io
+import json
+import os
+import subprocess
+import shutil
+import sqlite3
+import sys
+from collections import defaultdict
+from pathlib import Path
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+
+DEFAULT_CURSOR_STATE_DB = (
+    Path.home() / "Library/Application Support/Cursor/User/globalStorage/state.vscdb"
+)
+USAGE_SUMMARY_ENDPOINT = "https://cursor.com/api/usage-summary"
+USAGE_CSV_ENDPOINT = (
+    "https://cursor.com/api/dashboard/export-usage-events-csv?strategy=tokens"
+)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Prototype helper that discovers a local Cursor session token, fetches "
+            "Cursor usage data, and writes normalized local artifacts."
+        )
+    )
+    parser.add_argument(
+        "--artifact-dir",
+        default=str(Path(".build/cursor-usage-prototype")),
+        help="Directory where the fetched and normalized artifacts should be written.",
+    )
+    parser.add_argument(
+        "--cursor-state-db",
+        default=str(DEFAULT_CURSOR_STATE_DB),
+        help="Path to Cursor's globalStorage state.vscdb used for token auto-discovery.",
+    )
+    parser.add_argument(
+        "--session-token",
+        help="Explicit WorkosCursorSessionToken override. Skips local token discovery.",
+    )
+    parser.add_argument(
+        "--csv-in",
+        help="Offline fixture mode: parse this CSV instead of fetching from Cursor.",
+    )
+    parser.add_argument(
+        "--summary-in",
+        help="Offline fixture mode: read this usage-summary JSON instead of fetching it.",
+    )
+    parser.add_argument(
+        "--db",
+        help=(
+            "Optional Tokenmon database path. When set, the script also ingests the "
+            "generated Cursor provider events into Tokenmon."
+        ),
+    )
+    parser.add_argument(
+        "--tokenmon-app-bin",
+        help=(
+            "Optional TokenmonApp binary path. If omitted, the script falls back to "
+            "`swift run TokenmonApp` from the repository root."
+        ),
+    )
+    return parser.parse_args()
+
+
+def fail(message: str) -> None:
+    print(f"ERROR: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def read_cursor_access_token(state_db_path: Path) -> tuple[str, str]:
+    if state_db_path.exists() is False:
+        fail(f"cursor state db not found: {state_db_path}")
+
+    try:
+        connection = sqlite3.connect(f"file:{state_db_path}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        fail(f"could not open cursor state db: {exc}")
+
+    try:
+        cursor = connection.cursor()
+        row = cursor.execute(
+            "SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken' LIMIT 1"
+        ).fetchone()
+    except sqlite3.Error as exc:
+        fail(f"could not query cursor auth token: {exc}")
+    finally:
+        connection.close()
+
+    if row is None or not isinstance(row[0], str) or not row[0].strip():
+        fail("cursorAuth/accessToken not found in Cursor state db")
+
+    access_token = row[0].strip()
+    payload = decode_jwt_payload(access_token)
+    sub = payload.get("sub")
+    if not isinstance(sub, str) or not sub:
+        fail("cursor access token payload is missing 'sub'")
+
+    user_id = sub.split("|")[-1]
+    session_token = f"{user_id}%3A%3A{access_token}"
+    return session_token, user_id
+
+
+def decode_jwt_payload(access_token: str) -> dict[str, Any]:
+    parts = access_token.split(".")
+    if len(parts) != 3:
+        fail("cursor access token is not a JWT")
+
+    payload_segment = parts[1]
+    padding = "=" * (-len(payload_segment) % 4)
+
+    try:
+        decoded = base64.urlsafe_b64decode(payload_segment + padding)
+        return json.loads(decoded.decode("utf-8"))
+    except (ValueError, json.JSONDecodeError) as exc:
+        fail(f"could not decode cursor JWT payload: {exc}")
+
+
+def build_headers(session_token: str, referer: str) -> dict[str, str]:
+    return {
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cookie": f"WorkosCursorSessionToken={session_token}",
+        "Referer": referer,
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+    }
+
+
+def fetch_text(url: str, session_token: str, referer: str) -> str:
+    request = Request(url, headers=build_headers(session_token, referer))
+    try:
+        with urlopen(request, timeout=30) as response:
+            return response.read().decode("utf-8")
+    except HTTPError as exc:
+        fail(f"cursor api returned {exc.code} for {url}")
+    except URLError as exc:
+        fail(f"failed to reach cursor api for {url}: {exc.reason}")
+
+
+def load_summary(summary_path: Path | None, session_token: str | None) -> tuple[dict[str, Any], str]:
+    if summary_path is not None:
+        return json.loads(summary_path.read_text(encoding="utf-8")), "fixture"
+
+    if session_token is None:
+        fail("summary input requires either --summary-in or a live session token")
+
+    summary_json = fetch_text(
+        USAGE_SUMMARY_ENDPOINT,
+        session_token=session_token,
+        referer="https://www.cursor.com/settings",
+    )
+    return json.loads(summary_json), "live_api"
+
+
+def load_csv(csv_path: Path | None, session_token: str | None) -> tuple[str, str]:
+    if csv_path is not None:
+        return csv_path.read_text(encoding="utf-8"), "fixture"
+
+    if session_token is None:
+        fail("csv input requires either --csv-in or a live session token")
+
+    csv_text = fetch_text(
+        USAGE_CSV_ENDPOINT,
+        session_token=session_token,
+        referer="https://www.cursor.com/dashboard?tab=usage",
+    )
+    if csv_text.startswith("Date,") is False:
+        fail("cursor usage export did not return CSV data")
+    return csv_text, "live_api"
+
+
+def parse_int(value: str | None) -> int:
+    if value is None:
+        return 0
+    text = value.strip().replace(",", "")
+    if text == "":
+        return 0
+    try:
+        return int(text)
+    except ValueError:
+        return 0
+
+
+def parse_cost(value: str | None) -> float:
+    if value is None:
+        return 0.0
+    text = value.strip().replace("$", "").replace(",", "")
+    if text == "" or text.lower() == "nan" or any(ch.isdigit() for ch in text) is False:
+        return 0.0
+    try:
+        return float(text)
+    except ValueError:
+        return 0.0
+
+
+def parse_csv_rows(csv_text: str) -> list[dict[str, Any]]:
+    reader = csv.DictReader(io.StringIO(csv_text))
+    rows: list[dict[str, Any]] = []
+
+    for index, row in enumerate(reader, start=1):
+        observed_at = (row.get("Date") or "").strip()
+        model = (row.get("Model") or "").strip()
+        if observed_at == "" or model == "":
+            continue
+
+        input_with_cache_write = parse_int(row.get("Input (w/ Cache Write)"))
+        input_without_cache_write = parse_int(row.get("Input (w/o Cache Write)"))
+        cache_read = parse_int(row.get("Cache Read"))
+        output_tokens = parse_int(row.get("Output Tokens"))
+        total_tokens = parse_int(row.get("Total Tokens"))
+        cache_write_tokens = max(input_with_cache_write - input_without_cache_write, 0)
+        input_tokens = input_without_cache_write
+
+        if total_tokens <= 0:
+            total_tokens = input_tokens + cache_write_tokens + cache_read + output_tokens
+
+        kind = (row.get("Kind") or "usage").strip() or "usage"
+        max_mode = (row.get("Max Mode") or "").strip() or None
+        cloud_agent_id = (row.get("Cloud Agent ID") or "").strip() or None
+        automation_id = (row.get("Automation ID") or "").strip() or None
+        cost_usd = parse_cost(row.get("Cost"))
+
+        fingerprint_payload = {
+            "automation_id": automation_id,
+            "cloud_agent_id": cloud_agent_id,
+            "cost_usd": cost_usd,
+            "index": index,
+            "input_tokens": input_tokens,
+            "kind": kind,
+            "model": model,
+            "observed_at": observed_at,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+        }
+        fingerprint = hashlib.sha256(
+            json.dumps(fingerprint_payload, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+
+        rows.append(
+            {
+                "observed_at": observed_at,
+                "cloud_agent_id": cloud_agent_id,
+                "automation_id": automation_id,
+                "kind": kind,
+                "model_slug": model,
+                "max_mode": max_mode,
+                "input_tokens": input_tokens,
+                "cache_write_tokens": cache_write_tokens,
+                "cache_read_tokens": cache_read,
+                "output_tokens": output_tokens,
+                "total_tokens": total_tokens,
+                "cost_usd": cost_usd,
+                "row_fingerprint": fingerprint,
+            }
+        )
+
+    return rows
+
+
+def summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    models: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {
+            "rows": 0,
+            "input_tokens": 0,
+            "cache_write_tokens": 0,
+            "cache_read_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "cost_usd": 0.0,
+        }
+    )
+    kinds: dict[str, int] = defaultdict(int)
+    cloud_agents: dict[str, int] = defaultdict(int)
+    automations: dict[str, int] = defaultdict(int)
+
+    total_cost = 0.0
+    total_tokens = 0
+
+    for row in rows:
+        model_summary = models[row["model_slug"]]
+        model_summary["rows"] += 1
+        model_summary["input_tokens"] += row["input_tokens"]
+        model_summary["cache_write_tokens"] += row["cache_write_tokens"]
+        model_summary["cache_read_tokens"] += row["cache_read_tokens"]
+        model_summary["output_tokens"] += row["output_tokens"]
+        model_summary["total_tokens"] += row["total_tokens"]
+        model_summary["cost_usd"] += row["cost_usd"]
+
+        kinds[row["kind"]] += 1
+        if row["cloud_agent_id"] is not None:
+            cloud_agents[row["cloud_agent_id"]] += 1
+        if row["automation_id"] is not None:
+            automations[row["automation_id"]] += 1
+
+        total_tokens += row["total_tokens"]
+        total_cost += row["cost_usd"]
+
+    sorted_models = sorted(
+        (
+            {"model_slug": model_slug, **payload}
+            for model_slug, payload in models.items()
+        ),
+        key=lambda item: (-item["total_tokens"], item["model_slug"]),
+    )
+
+    return {
+        "row_count": len(rows),
+        "model_count": len(sorted_models),
+        "kind_counts": dict(sorted(kinds.items())),
+        "cloud_agent_count": len(cloud_agents),
+        "automation_count": len(automations),
+        "total_tokens": total_tokens,
+        "total_cost_usd": round(total_cost, 6),
+        "models": sorted_models,
+    }
+
+
+def ensure_artifact_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+
+
+def repo_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def tokenmon_base_command(tokenmon_app_bin: str | None) -> list[str]:
+    if tokenmon_app_bin:
+        return [tokenmon_app_bin]
+    return ["swift", "run", "TokenmonApp"]
+
+
+def run_tokenmon_command(tokenmon_app_bin: str | None, arguments: list[str]) -> str:
+    command = tokenmon_base_command(tokenmon_app_bin) + arguments
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=repo_root(),
+            check=True,
+            text=True,
+            capture_output=True,
+            env=os.environ.copy(),
+        )
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.strip()
+        stdout = exc.stdout.strip()
+        detail = stderr or stdout or str(exc)
+        fail(f"tokenmon command failed: {' '.join(command)} :: {detail}")
+    return completed.stdout.strip()
+
+
+def tokenmon_value(output: str, key: str) -> str | None:
+    prefix = f"{key}: "
+    for line in output.splitlines():
+        if line.startswith(prefix):
+            return line[len(prefix):].strip()
+    return None
+
+
+def main() -> None:
+    args = parse_args()
+
+    artifact_dir = Path(args.artifact_dir).resolve()
+    cursor_state_db = Path(args.cursor_state_db).expanduser().resolve()
+    csv_input_path = Path(args.csv_in).expanduser().resolve() if args.csv_in else None
+    summary_input_path = (
+        Path(args.summary_in).expanduser().resolve() if args.summary_in else None
+    )
+
+    if (csv_input_path is None) != (summary_input_path is None):
+        fail("--csv-in and --summary-in must be provided together for fixture mode")
+
+    if args.session_token:
+        session_token = args.session_token.strip()
+        token_source = "cli"
+        user_id = None
+    elif csv_input_path is not None:
+        session_token = None
+        token_source = "fixture"
+        user_id = None
+    else:
+        session_token, user_id = read_cursor_access_token(cursor_state_db)
+        token_source = f"cursor_state_db:{cursor_state_db}"
+
+    summary_payload, summary_mode = load_summary(summary_input_path, session_token)
+    csv_text, csv_mode = load_csv(csv_input_path, session_token)
+    if summary_mode != csv_mode:
+        fail("summary and csv inputs must come from the same mode")
+
+    rows = parse_csv_rows(csv_text)
+    row_summary = summarize_rows(rows)
+
+    ensure_artifact_dir(artifact_dir)
+    csv_out_path = artifact_dir / "cursor-usage-export.csv"
+    summary_out_path = artifact_dir / "cursor-usage-summary.json"
+    events_out_path = artifact_dir / "cursor-usage-events.jsonl"
+    tokenmon_events_out_path = artifact_dir / "cursor-tokenmon-provider-events.ndjson"
+
+    if csv_input_path is not None:
+        shutil.copyfile(csv_input_path, csv_out_path)
+    else:
+        csv_out_path.write_text(csv_text, encoding="utf-8")
+
+    write_jsonl(events_out_path, rows)
+
+    consolidated_summary = {
+        "mode": csv_mode,
+        "token_source": token_source,
+        "cursor_state_db": None if csv_mode == "fixture" else str(cursor_state_db),
+        "user_id": user_id,
+        "billing_cycle_start": summary_payload.get("billingCycleStart"),
+        "billing_cycle_end": summary_payload.get("billingCycleEnd"),
+        "membership_type": summary_payload.get("membershipType"),
+        "row_summary": row_summary,
+        "raw_usage_summary": summary_payload,
+    }
+    write_json(summary_out_path, consolidated_summary)
+
+    tokenmon_import_output = run_tokenmon_command(
+        args.tokenmon_app_bin,
+        [
+            "--tokenmon-provider-cursor-import-csv",
+            str(csv_out_path),
+            "--out",
+            str(tokenmon_events_out_path),
+        ],
+    )
+
+    tokenmon_ingest_output = None
+    tokenmon_summary_output = None
+    if args.db:
+        source_key = "cursor-sync:" + hashlib.sha256(csv_text.encode("utf-8")).hexdigest()[:16]
+        tokenmon_ingest_output = run_tokenmon_command(
+            args.tokenmon_app_bin,
+            [
+                "--tokenmon-ingest-inbox",
+                str(tokenmon_events_out_path),
+                "--db",
+                args.db,
+                "--source-key",
+                source_key,
+            ],
+        )
+        tokenmon_summary_output = run_tokenmon_command(
+            args.tokenmon_app_bin,
+            [
+                "--tokenmon-summary",
+                "--db",
+                args.db,
+            ],
+        )
+
+    print("cursor usage prototype complete")
+    print(f"mode: {csv_mode}")
+    print(f"token_source: {token_source}")
+    print(f"rows: {row_summary['row_count']}")
+    print(f"models: {row_summary['model_count']}")
+    print(f"cloud_agents: {row_summary['cloud_agent_count']}")
+    print(f"automations: {row_summary['automation_count']}")
+    print(f"billing_cycle_start: {consolidated_summary['billing_cycle_start']}")
+    print(f"billing_cycle_end: {consolidated_summary['billing_cycle_end']}")
+    print(f"membership_type: {consolidated_summary['membership_type']}")
+    print(f"csv_path: {csv_out_path}")
+    print(f"summary_path: {summary_out_path}")
+    print(f"events_path: {events_out_path}")
+    print(f"tokenmon_events_path: {tokenmon_events_out_path}")
+    print(f"tokenmon_import: {tokenmon_value(tokenmon_import_output, 'events_written') or 'ok'}")
+    if tokenmon_ingest_output is not None:
+        print("tokenmon_ingest: ok")
+        for key in (
+            "accepted",
+            "duplicates",
+            "rejected",
+            "usage_samples",
+            "checkpoint_offset",
+            "checkpoint_line",
+        ):
+            value = tokenmon_value(tokenmon_ingest_output, key)
+            if value is not None:
+                print(f"{key}: {value}")
+    if tokenmon_summary_output is not None:
+        for key in ("total_normalized_tokens", "tokens_since_last_encounter", "total_encounters"):
+            value = tokenmon_value(tokenmon_summary_output, key)
+            if value is not None:
+                print(f"gameplay_{key}: {value}")
+        gameplay_total = tokenmon_value(tokenmon_summary_output, "total_normalized_tokens")
+        accepted = tokenmon_value(tokenmon_ingest_output or "", "accepted")
+        if gameplay_total == "0" and accepted not in (None, "0"):
+            print("gameplay_note: imported rows were accounting-only under the current gameplay boundary")
+
+
+if __name__ == "__main__":
+    main()

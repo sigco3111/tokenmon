@@ -1564,6 +1564,8 @@ enum TokenmonSettingsPresentationBuilder {
             return TokenmonL10n.string("settings.providers.support.first_class")
         case "best_effort":
             return TokenmonL10n.string("settings.providers.support.best_effort")
+        case "managed_only":
+            return TokenmonL10n.string("settings.providers.support.managed_only")
         default:
             return rawValue
                 .replacingOccurrences(of: "_", with: " ")
@@ -1596,6 +1598,8 @@ enum TokenmonSettingsPresentationBuilder {
             return TokenmonL10n.string("settings.providers.source_mode.codex_interactive_observer")
         case "codex_transcript_backfill":
             return TokenmonL10n.string("settings.providers.source_mode.transcript_backfill")
+        case "cursor_usage_export_api":
+            return TokenmonL10n.string("settings.providers.source_mode.cursor_usage_export_api")
         default:
             return rawValue
                 .replacingOccurrences(of: "_", with: " ")
@@ -1904,6 +1908,8 @@ private struct TokenmonProviderSettingsCard: View {
             return "terminal"
         case .gemini:
             return "antenna.radiowaves.left.and.right"
+        case .cursor:
+            return "arrow.triangle.branch"
         }
     }
 

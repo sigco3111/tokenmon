@@ -1,0 +1,4 @@
+Date,Cloud Agent ID,Automation ID,Kind,Model,Max Mode,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost
+2026-04-18T01:00:00Z,agent-alpha,,agent,gpt-5.4,auto,1400,1000,250,400,2050,$0.12
+2026-04-18T01:05:00Z,agent-alpha,,agent,claude-3.7-sonnet,max,900,800,100,300,1300,Included
+2026-04-18T01:10:00Z,,auto-docs,automation,gpt-4.1,,700,700,50,200,950,$0.03
