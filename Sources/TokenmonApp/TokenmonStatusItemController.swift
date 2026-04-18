@@ -95,6 +95,7 @@ final class TokenmonSceneDebugController: ObservableObject {
 @MainActor
 final class TokenmonAppController {
     static let shared = TokenmonAppController()
+    private static let cursorSyncIntervalNanoseconds: UInt64 = 20_000_000_000
 
     let sceneDebugController = TokenmonSceneDebugController.shared
     let menuModel: TokenmonMenuModel
@@ -107,6 +108,7 @@ final class TokenmonAppController {
     private var codexSessionsRootPath: String?
     private var startupTask: Task<Void, Never>?
     private var recoveryTask: Task<Void, Never>?
+    private var cursorSyncTask: Task<Void, Never>?
 
     private lazy var statusItemController: TokenmonStatusItemController = {
         let controller = TokenmonStatusItemController(
@@ -189,6 +191,8 @@ final class TokenmonAppController {
         let executablePath = Bundle.main.executableURL?.path ?? CommandLine.arguments[0]
         startupTask?.cancel()
         recoveryTask?.cancel()
+        cursorSyncTask?.cancel()
+        cursorSyncTask = nil
         recoveryTask = nil
         startupTask = Task.detached(priority: .utility) { [weak self] in
             guard let self else {
@@ -274,12 +278,17 @@ final class TokenmonAppController {
 
             phaseStartedAt = Date()
             let codexDiscovery = TokenmonProviderDiscovery.discover(provider: .codex, preferences: preferences)
+            let cursorDiscovery = TokenmonProviderDiscovery.discover(provider: .cursor, preferences: preferences)
             let sessionsRootPath = CodexSessionStorageLocator.sessionStorageRootPath(
                 config: CodexSessionStorageLocatorConfig(
                     configurationRootPath: codexDiscovery.configurationPath
                 )
             )
-            logStartupPhase("resolve_codex_paths", startedAt: phaseStartedAt)
+            logStartupPhase(
+                "resolve_provider_paths",
+                startedAt: phaseStartedAt,
+                metadata: ["cursor_detected": cursorDiscovery.executableExists ? "yes" : "no"]
+            )
 
             phaseStartedAt = Date()
             let observer = CodexSessionStoreObserver(
@@ -308,6 +317,36 @@ final class TokenmonAppController {
                     startedAt: liveMonitoringStartedAt,
                     metadata: ["elapsed_ms": TokenmonAppBehaviorLogger.durationMillisecondsString(since: startupTaskStartedAt)]
                 )
+
+                if cursorDiscovery.executableExists {
+                    let cursorSyncStartedAt = Date()
+                    self.cursorSyncTask = Task { @MainActor [weak self] in
+                        guard let self else {
+                            return
+                        }
+
+                        await self.menuModel.syncCursorUsageInBackground()
+
+                        while Task.isCancelled == false {
+                            do {
+                                try await Task.sleep(nanoseconds: Self.cursorSyncIntervalNanoseconds)
+                            } catch {
+                                return
+                            }
+
+                            guard Task.isCancelled == false else {
+                                return
+                            }
+
+                            await self.menuModel.syncCursorUsageInBackground()
+                        }
+                    }
+                    logStartupPhase(
+                        "cursor_background_sync_started",
+                        startedAt: cursorSyncStartedAt,
+                        metadata: ["interval_seconds": "20"]
+                    )
+                }
 
                 let geminiSetupStartedAt = Date()
                 let supervisor = GeminiOtelReceiverSupervisor(
@@ -433,6 +472,8 @@ final class TokenmonAppController {
         startupTask = nil
         recoveryTask?.cancel()
         recoveryTask = nil
+        cursorSyncTask?.cancel()
+        cursorSyncTask = nil
         codexSessionStoreObserver?.stop()
         codexSessionStoreObserver = nil
         clearOnboardingWindow(closeWindow: true)

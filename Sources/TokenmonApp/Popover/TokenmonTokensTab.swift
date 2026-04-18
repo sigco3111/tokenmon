@@ -72,7 +72,7 @@ struct TokenmonTokensTab: View {
         }
     }
 
-    private var providerSplitOrder: [ProviderCode] { [.claude, .codex, .gemini] }
+    private var providerSplitOrder: [ProviderCode] { [.claude, .codex, .gemini, .cursor] }
 
     private func providerColor(_ provider: ProviderCode) -> Color {
         switch provider {
@@ -126,19 +126,41 @@ struct TokenmonTokensTab: View {
                     .stroke(Color.secondary.opacity(0.12), lineWidth: 0.5)
             )
 
-            HStack(spacing: 12) {
+            LazyVGrid(
+                columns: [
+                    GridItem(.flexible(minimum: 0, maximum: .infinity), spacing: 8),
+                    GridItem(.flexible(minimum: 0, maximum: .infinity), spacing: 8),
+                ],
+                alignment: .leading,
+                spacing: 6
+            ) {
                 ForEach(providerSplitOrder, id: \.self) { provider in
-                    HStack(spacing: 4) {
-                        Circle().fill(providerColor(provider)).frame(width: 7, height: 7)
-                        Text(providerShortName(provider))
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 5) {
+                            Circle()
+                                .fill(providerColor(provider))
+                                .frame(width: 7, height: 7)
+                            Text(providerShortName(provider))
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.95)
+                        }
+
                         Text(TokenmonCompactCountFormatter.string(for: model.tokenByProviderToday[provider] ?? 0))
-                            .font(.caption2.monospacedDigit())
+                            .font(.caption.monospacedDigit())
                             .foregroundStyle(.primary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.secondary.opacity(0.08))
+                    )
                 }
-                Spacer(minLength: 0)
             }
         }
     }
