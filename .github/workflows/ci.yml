@@ -15,7 +15,7 @@ env:
 
 jobs:
   verify-pr:
-    if: github.event_name == 'pull_request'
+    if: github.repository == 'aroido/tokenmon' && github.event_name == 'pull_request'
     runs-on: macos-26
     env:
       TOKENMON_VERIFY_SCRATCH_PATH: ${{ github.workspace }}/.build/ci-pr
@@ -48,7 +48,7 @@ jobs:
         run: ./scripts/ai-verify --mode pr
 
   verify-main:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.repository == 'aroido/tokenmon' && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: macos-26
     env:
       TOKENMON_VERIFY_SCRATCH_PATH: ${{ github.workspace }}/.build/ci-main

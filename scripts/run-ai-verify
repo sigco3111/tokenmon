@@ -134,6 +134,7 @@ public_release_feed_url="$("$ROOT/scripts/tokenmon-release-targets" default-feed
 has_species_art_tooling=0
 has_repo_workflow_tooling=0
 has_public_export_tooling=0
+has_marketing_tooling=0
 
 if have_repo_paths \
   "scripts/sync-species-art-manifest" \
@@ -163,6 +164,18 @@ if have_repo_paths \
   "PublicExport/overlay/README.md"
 then
   has_public_export_tooling=1
+fi
+
+if have_repo_paths \
+  "scripts/tokenmon-marketing-team" \
+  "marketing/README.md" \
+  "marketing/prompts/daily-cmo-pack.md" \
+  "marketing/positioning.md" \
+  "marketing/channel-rules.md" \
+  "marketing/guardrails.md" \
+  "docs/development/marketing-team-harness.md"
+then
+  has_marketing_tooling=1
 fi
 
 require_any_contains() {
@@ -673,6 +686,23 @@ else
 fi
 
 if [[ "$has_repo_workflow_tooling" == "1" ]]; then
+  ci_workflow="$ROOT/.github/workflows/ci.yml"
+  nightly_workflow="$ROOT/.github/workflows/nightly-verify.yml"
+  if [[ -f "$ci_workflow" ]]; then
+    require_contains "$(cat "$ci_workflow")" "github.repository == 'aroido/tokenmon' && github.event_name == 'pull_request'"
+    require_contains "$(cat "$ci_workflow")" "github.repository == 'aroido/tokenmon' && github.event_name == 'push' && github.ref == 'refs/heads/main'"
+  else
+    printf 'VERIFY FAIL: missing public-gated CI workflow\n' >&2
+    exit 1
+  fi
+  if [[ -f "$nightly_workflow" ]]; then
+    require_contains "$(cat "$nightly_workflow")" "github.repository == 'aroido/tokenmon'"
+  else
+    printf 'VERIFY FAIL: missing public-gated nightly workflow\n' >&2
+    exit 1
+  fi
+  printf 'VERIFY PASS: GitHub Actions jobs are gated to public release repo\n'
+
   repo_codex_audit_output="$("$ROOT/scripts/audit-codex-global-setup" --repo "$ROOT" --home "$tmpdir/empty-codex-home" 2>&1)"
   expected_repo_skill_count="$(find "$ROOT/.agents/skills" -mindepth 2 -maxdepth 2 -name 'SKILL.md' 2>/dev/null | wc -l | tr -d ' ')"
   expected_repo_alias_skill_count="$(find "$ROOT/.codex/skills" -mindepth 2 -maxdepth 2 -name 'SKILL.md' 2>/dev/null | wc -l | tr -d ' ')"
@@ -827,6 +857,64 @@ JSON
   printf 'VERIFY PASS: legacy codex hook cleanup helper\n'
 else
   printf 'VERIFY INFO: skipping repo-private workflow helper checks because repo workflow assets are absent\n'
+fi
+
+if [[ "$has_marketing_tooling" == "1" ]]; then
+  marketing_started_at="$(timing_now)"
+  marketing_stub="$tmpdir/marketing-stub.md"
+  marketing_trends="$tmpdir/marketing-trends.md"
+  marketing_outbox="$tmpdir/marketing-outbox"
+  marketing_runs="$tmpdir/marketing-runs"
+  cat >"$marketing_stub" <<'MARKETING_STUB'
+# CMO Brief
+
+Stubbed bilingual Tokenmon marketing pack for deterministic verification.
+
+## Human Approval Checklist
+
+- Confirm no public posting happened.
+- Confirm claims are grounded in Tokenmon docs.
+MARKETING_STUB
+  cat >"$marketing_trends" <<'MARKETING_TRENDS'
+# Web Trend Signals
+
+- Developers are discussing AI coding tool workflows.
+MARKETING_TRENDS
+
+  marketing_env_file="$tmpdir/marketing-team.env"
+  marketing_status_output="$(TOKENMON_MARKETING_ENV_FILE="$marketing_env_file" TOKENMON_MARKETING_NOTIFY=0 "$ROOT/scripts/tokenmon-marketing-team" status 2>&1)"
+  require_contains "$marketing_status_output" "public_posting_enabled=no"
+  require_contains "$marketing_status_output" "brief_path="
+
+  marketing_dry_output="$(TOKENMON_MARKETING_ENV_FILE="$marketing_env_file" TOKENMON_MARKETING_FIXED_DATE=2026-04-19 TOKENMON_MARKETING_FIXED_RUN_ID=verify-dry-run TOKENMON_MARKETING_NOTIFY=0 "$ROOT/scripts/tokenmon-marketing-team" run --dry-run --no-web --skip-notion 2>&1)"
+  require_contains "$marketing_dry_output" "marketing_dry_run=yes"
+  require_contains "$marketing_dry_output" "run_id=verify-dry-run"
+  require_contains "$marketing_dry_output" "would_skip_notion=yes"
+
+  marketing_run_output="$(TOKENMON_MARKETING_ENV_FILE="$marketing_env_file" TOKENMON_MARKETING_OUTBOX_DIR="$marketing_outbox" TOKENMON_MARKETING_RUNS_DIR="$marketing_runs" TOKENMON_MARKETING_FIXED_DATE=2026-04-19 TOKENMON_MARKETING_FIXED_RUN_ID=verify-run TOKENMON_MARKETING_CODEX_STUB_OUTPUT="$marketing_stub" TOKENMON_MARKETING_TRENDS_FILE="$marketing_trends" TOKENMON_MARKETING_NOTIFY=0 "$ROOT/scripts/tokenmon-marketing-team" run --skip-notion 2>&1)"
+  require_contains "$marketing_run_output" "marketing_run_status=completed"
+  require_contains "$marketing_run_output" "run_id=verify-run"
+  require_contains "$marketing_run_output" "notion_status=skipped"
+  [[ -f "$marketing_outbox/verify-run/cmo-pack.md" ]] || { printf 'VERIFY FAIL: marketing run should write local CMO pack\n' >&2; exit 1; }
+  [[ -f "$marketing_outbox/verify-run/metadata.json" ]] || { printf 'VERIFY FAIL: marketing run should write metadata\n' >&2; exit 1; }
+  require_contains "$(cat "$marketing_outbox/verify-run/cmo-pack.md")" "Human Approval Checklist"
+  require_contains "$(cat "$marketing_outbox/verify-run/metadata.json")" '"public_posting_enabled": false'
+  require_contains "$(cat "$marketing_outbox/verify-run/metadata.json")" '"notion_status": "skipped"'
+
+  marketing_setup_dry_output="$(TOKENMON_MARKETING_ENV_FILE="$marketing_env_file" TOKENMON_MARKETING_NOTION_PARENT_PAGE_ID=00000000-0000-0000-0000-000000000000 TOKENMON_MARKETING_NOTIFY=0 "$ROOT/scripts/tokenmon-marketing-team" setup-notion --dry-run 2>&1)"
+  require_contains "$marketing_setup_dry_output" "notion_setup_dry_run=yes"
+  require_contains "$marketing_setup_dry_output" "would_create_campaign_database=yes"
+  require_contains "$marketing_setup_dry_output" "would_create_drafts_database=yes"
+  require_contains "$marketing_setup_dry_output" "would_create_assets_database=yes"
+
+  marketing_launchd_dry_output="$(TOKENMON_MARKETING_ENV_FILE="$marketing_env_file" TOKENMON_MARKETING_NOTIFY=0 "$ROOT/scripts/tokenmon-marketing-team" install-launchd --dry-run 2>&1)"
+  require_contains "$marketing_launchd_dry_output" "launchd_dry_run=yes"
+  require_contains "$marketing_launchd_dry_output" "launchd_plist="
+
+  printf 'VERIFY PASS: marketing team harness dry-run and stubbed generation\n'
+  record_timing "workflow_assets" "marketing_team_harness" "$marketing_started_at"
+else
+  printf 'VERIFY INFO: skipping marketing team harness checks because marketing tooling is absent\n'
 fi
 
 dot_asset_path="$tmpdir/generated-dots.svg"

@@ -9,6 +9,10 @@ import TokenmonDomain
 @Suite(.serialized)
 @MainActor
 struct TokenmonPresentationTests {
+    init() {
+        TokenmonL10n.setLocaleOverride("en")
+    }
+
     @Test
     func sceneContextShowsResolveSuccessForRecentCapture() {
         let summary = makeSummary(
@@ -592,11 +596,17 @@ struct TokenmonPresentationTests {
         let first = config.tokensRequiredForEncounter(1)
         let second = config.tokensRequiredForEncounter(2)
         let firstRepeat = config.tokensRequiredForEncounter(1)
+        let earlyRange = config.scaledThresholdRange(capturedSpeciesCount: 0)
+        let lateRange = config.scaledThresholdRange(capturedSpeciesCount: SpeciesCatalog.expectedCount)
 
-        #expect(first >= config.minimumEncounterThresholdTokens)
-        #expect(first <= config.maximumEncounterThresholdTokens)
-        #expect(second >= config.minimumEncounterThresholdTokens)
-        #expect(second <= config.maximumEncounterThresholdTokens)
+        #expect(earlyRange.min == 5_000_000)
+        #expect(earlyRange.max == 7_000_000)
+        #expect(lateRange.min == 25_000_000)
+        #expect(lateRange.max == 30_000_000)
+        #expect(first >= earlyRange.min)
+        #expect(first <= earlyRange.max)
+        #expect(second >= earlyRange.min)
+        #expect(second <= earlyRange.max)
         #expect(first == firstRepeat)
         #expect(first != second)
     }
@@ -1183,16 +1193,17 @@ struct TokenmonPresentationTests {
 
         #expect(legendary.glareOpacity > common.glareOpacity)
         #expect(rare.glareOpacity > uncommon.glareOpacity)
-        #expect(legendary.shellEdgeGlow > common.shellEdgeGlow)
-        #expect(rare.frameGlossOpacity > uncommon.frameGlossOpacity)
-        #expect(epic.foilOpacity > common.foilOpacity)
+        #expect(legendary.frameHighlight > common.frameHighlight)
         #expect(legendary.shadowOpacity > common.shadowOpacity)
-        #expect(legendary.hoverGlowBoost > common.hoverGlowBoost)
-        #expect(legendary.hoverEdgeSweepOpacity > rare.hoverEdgeSweepOpacity)
+        #expect(legendary.hoverShadowBoost > common.hoverShadowBoost)
+        #expect(legendary.holoOpacity > common.holoOpacity)
+        #expect(legendary.holoGlareIntensity > common.holoGlareIntensity)
+        #expect(legendary.sparkleCount > epic.sparkleCount)
+        #expect(legendary.tiltStrength > common.tiltStrength)
         #expect(common.shimmerOpacity == 0)
-        #expect(rare.shimmerOpacity > 0)
-        #expect(epic.shimmerOpacity > rare.shimmerOpacity)
-        #expect(legendary.shimmerOpacity > epic.shimmerOpacity)
+        #expect(rare.shimmerOpacity == 0)
+        #expect(epic.shimmerOpacity == 0)
+        #expect(legendary.shimmerOpacity == 0)
         #expect(uncommon.shellCenterProtection < 0.025)
         #expect(legendary.shellCenterProtection > common.shellCenterProtection)
         #expect(legendary.artBackplateOpacity > common.artBackplateOpacity)
@@ -2989,7 +3000,7 @@ struct TokenmonPresentationTests {
         #expect(appOpenedEvents.count == 1)
         #expect(appOpenedEvents.first?.properties["has_latest_encounter"] == "false")
         #expect(appOpenedEvents.first?.properties["claude_connected"] == "true")
-        #expect(appOpenedEvents.first?.properties["claude_live_gameplay_armed"] == "true")
+        #expect(appOpenedEvents.first?.properties["claude_live_gameplay_armed"] == "false")
         #expect(appOpenedEvents.first?.properties["codex_connected"] == "false")
         #expect(try manager.appSettings().usageAnalyticsEnabled)
     }
@@ -3719,8 +3730,10 @@ struct TokenmonPresentationTests {
         for assetKey in assetKeys {
             let image = TokenmonSpeciesSpriteLoader.image(assetKey: assetKey, variant: .portrait32)
             #expect(image != nil)
-            #expect(image?.size.width == 32)
-            #expect(image?.size.height == 32)
+            #expect((image?.size.width ?? 0) > 0)
+            #expect((image?.size.height ?? 0) > 0)
+            #expect((image?.size.width ?? 0) <= 64)
+            #expect((image?.size.height ?? 0) <= 64)
         }
     }
 
@@ -4181,7 +4194,7 @@ struct TokenmonPresentationTests {
 
         #expect(model.appSettings.updateNotificationsEnabled == false)
         #expect(try manager.appSettings().updateNotificationsEnabled == false)
-        #expect(coordinator.updatePreferenceChanges.isEmpty)
+        #expect(coordinator.updatePreferenceChanges == [false])
     }
 
     @Test

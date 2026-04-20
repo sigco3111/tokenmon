@@ -964,7 +964,11 @@ public final class TokenmonDatabaseManager {
 
     private func ensureBootstrapped(_ database: SQLiteDatabase) throws {
         try Self.bootstrapState.lock.withLock {
-            guard Self.bootstrapState.bootstrappedPaths.contains(path) == false else {
+            let alreadyBootstrapped = Self.bootstrapState.bootstrappedPaths.contains(path)
+            let currentVersion = try migrationVersion(database)
+            let latestVersion = latestMigrationVersion
+
+            guard alreadyBootstrapped == false || currentVersion < latestVersion else {
                 return
             }
 
@@ -973,15 +977,29 @@ public final class TokenmonDatabaseManager {
         }
     }
 
-    private func applyMigrations(_ database: SQLiteDatabase) throws {
-        let currentVersion = Int(try database.fetchOne("PRAGMA user_version;") { statement in
+    private var latestMigrationVersion: Int {
+        migrations.map(\.version).max() ?? 0
+    }
+
+    private func migrationVersion(_ database: SQLiteDatabase) throws -> Int {
+        Int(try database.fetchOne("PRAGMA user_version;") { statement in
             SQLiteDatabase.columnInt64(statement, index: 0)
         } ?? 0)
+    }
+
+    private func applyMigrations(_ database: SQLiteDatabase) throws {
+        let currentVersion = try migrationVersion(database)
 
         for migration in migrations where migration.version > currentVersion {
             let applyStatements = {
                 for statement in migration.statements {
-                    try database.execute(statement)
+                    do {
+                        try database.execute(statement)
+                    } catch let error as SQLiteError
+                        where Self.canSkipMigrationStatementFailure(error, statement: statement)
+                    {
+                        continue
+                    }
                 }
                 try database.execute("PRAGMA user_version = \(migration.version);")
             }
@@ -994,6 +1012,19 @@ public final class TokenmonDatabaseManager {
                 try applyStatements()
             }
         }
+    }
+
+    private static func canSkipMigrationStatementFailure(_ error: SQLiteError, statement: String) -> Bool {
+        guard case .statementFailed(let message, _) = error else {
+            return false
+        }
+
+        let normalizedStatement = statement
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .uppercased()
+        return normalizedStatement.hasPrefix("ALTER TABLE")
+            && normalizedStatement.contains(" ADD COLUMN ")
+            && message.localizedCaseInsensitiveContains("duplicate column name")
     }
 
     private func seedProviders(_ database: SQLiteDatabase) throws {

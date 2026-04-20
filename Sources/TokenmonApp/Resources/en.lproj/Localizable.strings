@@ -81,7 +81,21 @@
 "window.title.welcome_guide" = "Welcome to Tokenmon";
 "window.title.developer_tools" = "Developer Tools";
 
+"menu.headline.unavailable" = "Tokenmon unavailable";
+"menu.headline.loading" = "Loading Tokenmon";
+"menu.headline.waiting" = "Waiting for activity";
+"menu.headline.captured" = "Captured %1$@";
+"menu.headline.escaped" = "%1$@ escaped";
+"menu.detail.refreshing" = "Refreshing local state…";
+"menu.detail.start_exploring" = "Use Claude Code or Codex to start exploring.";
+"menu.stats.line" = "Encounters %1$lld • Captures %2$lld • Seen %3$d";
 "menu.latest.no_encounters" = "No encounters yet";
+"menu.latest.tone_line" = "%1$@ • %2$@";
+"menu.latest.detail" = "%1$@ • %2$@ • %3$@";
+"menu.provider_summary.ready.one" = "%1$d provider ready";
+"menu.provider_summary.ready.other" = "%1$d providers ready";
+"menu.provider_summary.partial" = "%1$d / %2$d providers ready";
+"menu.provider_summary.settings" = "Provider status available in Settings";
 
 "now.phase.waiting" = "Waiting";
 "now.phase.encounter" = "Encounter";
@@ -155,8 +169,16 @@
 "dex.sort.status" = "Status";
 "dex.sort.last_seen" = "Last seen";
 "dex.sort.captured_count" = "Captured count";
+"dex.activity.count.captured" = "%1$d captured";
+"dex.activity.count.revealed" = "%1$d revealed";
+"dex.progress.summary" = "%1$d captured · %2$d seen · %3$d hidden";
+"dex.progress.line" = "Dex %1$d%% complete";
+"dex.progress_panel.reveal_conditions" = "Reveal Conditions";
 "dex.progress_panel.progress" = "Progress";
+"dex.progress_panel.footnote.seen_uncaptured" = "This species has been seen but not captured yet.";
 "dex.field_notes.title" = "Field notes";
+"dex.field_notes.placeholder.seen_uncaptured" = "Capture this species to reveal the full field notes.";
+"dex.field_notes.placeholder.unknown" = "Encounter this species once to start revealing its field notes.";
 "dex.metric.captured" = "Captured";
 "dex.metric.seen" = "Seen";
 "dex.metric.first_seen" = "First seen";
@@ -276,6 +298,16 @@
 "provider.cursor.sync_again.action" = "Sync Cursor Again";
 "provider.cursor.connected.title" = "Cursor synced";
 "provider.cursor.connected.detail" = "Recent Cursor usage has been imported into Tokenmon. Depending on the gameplay boundary, imported rows may remain accounting-only until live gameplay is armed.";
+"provider.codex.ready.title" = "Codex ready";
+"provider.codex.ready.detail" = "Tokenmon automatically watches local Codex sessions. Downtime recovery updates dashboard totals only; gameplay only reflects live observation.";
+"settings.banner.error" = "Settings Error";
+"settings.banner.updated" = "Updated";
+"settings.providers.metadata.support" = "Support: %1$@";
+"settings.providers.metadata.mode" = "Mode: %1$@";
+"settings.providers.metadata.local_follow" = "Automatic local follow";
+"settings.providers.support.first_class" = "First-class";
+"settings.providers.support.best_effort" = "Best-effort";
+"settings.providers.source_mode.codex_interactive_observer" = "Interactive observer";
 "settings.providers.support.managed_only" = "Managed-only";
 "settings.providers.source_mode.cursor_usage_export_api" = "Usage export sync";
 "settings.providers.next_step.cursor_missing_configuration" = "Sync Cursor usage from Tokenmon to import the latest managed-only accounting data.";

@@ -83,7 +83,7 @@ public final class GeminiOtelGrpcServer: @unchecked Sendable {
         guard let server else {
             throw Error.notRunning
         }
-        try? await server.initiateGracefulShutdown().get()
+        try? await server.close().get()
         self.server = nil
         try? await group?.shutdownGracefully()
         self.group = nil
