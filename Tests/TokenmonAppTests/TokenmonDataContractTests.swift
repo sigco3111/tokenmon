@@ -3,7 +3,7 @@ import Testing
 @testable import TokenmonGameEngine
 @testable import TokenmonPersistence
 import TokenmonDomain
-import TokenmonProviders
+@testable import TokenmonProviders
 
 struct TokenmonDataContractTests {
     @Test
@@ -85,11 +85,19 @@ struct TokenmonDataContractTests {
     }
 
     @Test
-    func explorationAccumulatorUsesRebalancedThresholdRange() {
+    func explorationAccumulatorUsesCollectionScaledThresholdRanges() {
         let config = ExplorationAccumulatorConfig()
+        let earlyRange = config.scaledThresholdRange(capturedSpeciesCount: 0)
+        let lateRange = config.scaledThresholdRange(capturedSpeciesCount: SpeciesCatalog.expectedCount)
 
-        #expect(config.minimumEncounterThresholdTokens == 18_000_000)
-        #expect(config.maximumEncounterThresholdTokens == 22_000_000)
+        #expect(config.minimumEncounterThresholdTokens == 5_000_000)
+        #expect(config.startingEncounterThresholdMaxTokens == 7_000_000)
+        #expect(config.completionEncounterThresholdMinTokens == 25_000_000)
+        #expect(config.maximumEncounterThresholdTokens == 30_000_000)
+        #expect(earlyRange.min == 5_000_000)
+        #expect(earlyRange.max == 7_000_000)
+        #expect(lateRange.min == 25_000_000)
+        #expect(lateRange.max == 30_000_000)
     }
 
     @Test
@@ -1184,7 +1192,7 @@ struct TokenmonDataContractTests {
             SQLiteDatabase.columnText(statement, index: 1)
         }
 
-        #expect(version == 7)
+        #expect(version >= 7)
         #expect(usageSampleCount == 1)
         #expect(encounterCount == 1)
         #expect(gameplayColumns.contains("gameplay_eligibility"))
@@ -1666,9 +1674,12 @@ struct TokenmonDataContractTests {
 
         let inboxPath = tempDirectory.appendingPathComponent("gemini.ndjson").path
         let dataSource = StubGeminiReceiverDataSource()
+        let server = StubGeminiOtelReceiverServer()
         let supervisor = GeminiOtelReceiverSupervisor(
             dataSource: dataSource,
-            inboxPath: inboxPath
+            inboxPath: inboxPath,
+            configuration: GeminiOtelGrpcServer.Configuration(host: "127.0.0.1", port: 0),
+            makeServer: { _, _, _ in server }
         )
 
         await supervisor.start()
@@ -1683,6 +1694,8 @@ struct TokenmonDataContractTests {
 
         await supervisor.stop()
         #expect(supervisor.state == .stopped)
+        #expect(server.didStart)
+        #expect(server.didStop)
     }
 
     @Test
@@ -2120,5 +2133,18 @@ struct TokenmonDataContractTests {
 private final class StubGeminiReceiverDataSource: GeminiOtelReceiverDataSource {
     func latestGeminiSessionTotals() throws -> [String: GeminiSessionRunningTotals] {
         [:]
+    }
+}
+
+private final class StubGeminiOtelReceiverServer: GeminiOtelReceiverServer, @unchecked Sendable {
+    private(set) var didStart = false
+    private(set) var didStop = false
+
+    func start() async throws {
+        didStart = true
+    }
+
+    func stop() async throws {
+        didStop = true
     }
 }

@@ -6,11 +6,17 @@ public enum ExplorationDomainEventType: String, Sendable {
 }
 
 public struct ExplorationAccumulatorConfig: Equatable, Sendable {
-    /// Minimum normalized-token threshold required to trigger one encounter.
+    /// Lowest normalized-token threshold the dynamic pacing curve can sample.
     public let minimumEncounterThresholdTokens: Int64
 
-    /// Maximum normalized-token threshold required to trigger one encounter.
+    /// Highest normalized-token threshold the dynamic pacing curve can sample.
     public let maximumEncounterThresholdTokens: Int64
+
+    /// Upper bound for the early-game threshold range.
+    public let startingEncounterThresholdMaxTokens: Int64
+
+    /// Lower bound for the completion threshold range.
+    public let completionEncounterThresholdMinTokens: Int64
 
     /// Keep threshold generation on a 200-token grid so migrated saves preserve
     /// the same replay-safe cadence as the legacy implementation.
@@ -20,12 +26,16 @@ public struct ExplorationAccumulatorConfig: Equatable, Sendable {
     public let totalSpeciesCount: Int
 
     public init(
-        minimumEncounterThresholdTokens: Int64 = 18_000_000,
-        maximumEncounterThresholdTokens: Int64 = 22_000_000,
+        minimumEncounterThresholdTokens: Int64 = 5_000_000,
+        startingEncounterThresholdMaxTokens: Int64 = 7_000_000,
+        completionEncounterThresholdMinTokens: Int64 = 25_000_000,
+        maximumEncounterThresholdTokens: Int64 = 30_000_000,
         encounterThresholdQuantumTokens: Int64 = 200,
         totalSpeciesCount: Int = 151
     ) {
         self.minimumEncounterThresholdTokens = minimumEncounterThresholdTokens
+        self.startingEncounterThresholdMaxTokens = startingEncounterThresholdMaxTokens
+        self.completionEncounterThresholdMinTokens = completionEncounterThresholdMinTokens
         self.maximumEncounterThresholdTokens = maximumEncounterThresholdTokens
         self.encounterThresholdQuantumTokens = encounterThresholdQuantumTokens
         self.totalSpeciesCount = totalSpeciesCount
@@ -69,18 +79,15 @@ public struct ExplorationAccumulatorConfig: Equatable, Sendable {
     /// - ~120 captured: ~18M – 22M (approaching current default)
     /// - 151 captured: ~25M – 30M (slow encounters, late game)
     public func scaledThresholdRange(capturedSpeciesCount: Int) -> (min: Int64, max: Int64) {
-        let startMin: Int64 = 5_000_000
-        let startMax: Int64 = 7_000_000
-        let endMin: Int64 = 25_000_000
-        let endMax: Int64 = 30_000_000
-
         let total = max(1, totalSpeciesCount)
         let clamped = min(max(0, capturedSpeciesCount), total)
         let progress = Double(clamped) / Double(total)
         let factor = progress * progress // quadratic — back-loaded
 
-        let dynamicMin = startMin + Int64(Double(endMin - startMin) * factor)
-        let dynamicMax = startMax + Int64(Double(endMax - startMax) * factor)
+        let dynamicMin = minimumEncounterThresholdTokens
+            + Int64(Double(completionEncounterThresholdMinTokens - minimumEncounterThresholdTokens) * factor)
+        let dynamicMax = startingEncounterThresholdMaxTokens
+            + Int64(Double(maximumEncounterThresholdTokens - startingEncounterThresholdMaxTokens) * factor)
         return (dynamicMin, dynamicMax)
     }
 }
@@ -252,9 +259,13 @@ public struct ExplorationAccumulator {
         let quantumTokens = config.encounterThresholdQuantumTokens
 
         guard minimumTokens > 0,
+              config.startingEncounterThresholdMaxTokens >= minimumTokens,
+              config.completionEncounterThresholdMinTokens >= config.startingEncounterThresholdMaxTokens,
               maximumTokens >= minimumTokens,
               quantumTokens > 0,
               minimumTokens % quantumTokens == 0,
+              config.startingEncounterThresholdMaxTokens % quantumTokens == 0,
+              config.completionEncounterThresholdMinTokens % quantumTokens == 0,
               maximumTokens % quantumTokens == 0 else {
             throw ExplorationAccumulatorError.invalidConfiguration(
                 minimumEncounterThresholdTokens: minimumTokens,

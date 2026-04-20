@@ -2,6 +2,13 @@ import Foundation
 import Combine
 import TokenmonDomain
 
+protocol GeminiOtelReceiverServer: AnyObject, Sendable {
+    func start() async throws
+    func stop() async throws
+}
+
+extension GeminiOtelGrpcServer: GeminiOtelReceiverServer {}
+
 /// A dependency interface that supplies the supervisor with the data it needs
 /// from the persistence layer without creating a circular dependency between
 /// `TokenmonProviders` and `TokenmonPersistence`.
@@ -24,14 +31,43 @@ public final class GeminiOtelReceiverSupervisor: ObservableObject {
 
     private let dataSource: GeminiOtelReceiverDataSource
     private let inboxPath: String
-    private var server: GeminiOtelGrpcServer?
+    private let configuration: GeminiOtelGrpcServer.Configuration
+    private let makeServer: (
+        GeminiOtelGrpcServer.Configuration,
+        GeminiOtelLogsService,
+        GeminiOtelTraceService
+    ) -> any GeminiOtelReceiverServer
+    private var server: (any GeminiOtelReceiverServer)?
 
-    public init(
+    public convenience init(
         dataSource: GeminiOtelReceiverDataSource,
-        inboxPath: String
+        inboxPath: String,
+        configuration: GeminiOtelGrpcServer.Configuration = .default
+    ) {
+        self.init(
+            dataSource: dataSource,
+            inboxPath: inboxPath,
+            configuration: configuration,
+            makeServer: { configuration, logs, trace in
+                GeminiOtelGrpcServer(configuration: configuration, logsService: logs, traceService: trace)
+            }
+        )
+    }
+
+    init(
+        dataSource: GeminiOtelReceiverDataSource,
+        inboxPath: String,
+        configuration: GeminiOtelGrpcServer.Configuration = .default,
+        makeServer: @escaping (
+            GeminiOtelGrpcServer.Configuration,
+            GeminiOtelLogsService,
+            GeminiOtelTraceService
+        ) -> any GeminiOtelReceiverServer
     ) {
         self.dataSource = dataSource
         self.inboxPath = inboxPath
+        self.configuration = configuration
+        self.makeServer = makeServer
     }
 
     public func start() async {
@@ -51,14 +87,14 @@ public final class GeminiOtelReceiverSupervisor: ObservableObject {
         let tracker = GeminiCumulativeTracker(seed: seed)
         let logs = GeminiOtelLogsService(writer: writer, tracker: tracker)
         let trace = GeminiOtelTraceService()
-        let server = GeminiOtelGrpcServer(logsService: logs, traceService: trace)
+        let server = makeServer(configuration, logs, trace)
 
         do {
             try await server.start()
             self.server = server
             state = .running(
-                host: GeminiOtelGrpcServer.Configuration.default.host,
-                port: GeminiOtelGrpcServer.Configuration.default.port
+                host: configuration.host,
+                port: configuration.port
             )
         } catch {
             state = .failed(message: error.localizedDescription)
