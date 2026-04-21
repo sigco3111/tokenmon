@@ -360,23 +360,33 @@ private struct TokenmonProviderStatusChip: View {
     }
 
     private var presentationModel: Presentation {
+        let providerTint: Color = {
+            switch provider {
+            case .claude: return .orange
+            case .codex: return .teal
+            case .gemini: return .indigo
+            case .cursor: return .green
+            case .opencode: return .purple
+            }
+        }()
+
         if provider != .cursor, let installed = cliInstalled, !installed {
             return Presentation(tint: .secondary, accessibilityState: TokenmonL10n.string("provider.status.not_installed"))
         }
 
         guard let healthSummary else {
-            return Presentation(tint: .secondary, accessibilityState: TokenmonL10n.string("provider.status.unavailable"))
+            return Presentation(tint: providerTint.opacity(0.5), accessibilityState: TokenmonL10n.string("provider.status.unavailable"))
         }
 
         switch healthSummary.healthState {
         case "active", "connected":
-            return Presentation(tint: .green, accessibilityState: TokenmonL10n.string("provider.status.connected"))
+            return Presentation(tint: providerTint, accessibilityState: TokenmonL10n.string("provider.status.connected"))
         case "missing_configuration":
-            return Presentation(tint: .orange, accessibilityState: TokenmonL10n.string("provider.status.needs_setup"))
+            return Presentation(tint: providerTint.opacity(0.6), accessibilityState: TokenmonL10n.string("provider.status.needs_setup"))
         case "degraded", "unsupported":
-            return Presentation(tint: .red, accessibilityState: TokenmonL10n.string("provider.status.needs_attention"))
+            return Presentation(tint: providerTint.opacity(0.4), accessibilityState: TokenmonL10n.string("provider.status.needs_attention"))
         default:
-            return Presentation(tint: .secondary, accessibilityState: healthSummary.healthState)
+            return Presentation(tint: providerTint.opacity(0.5), accessibilityState: healthSummary.healthState)
         }
     }
 
