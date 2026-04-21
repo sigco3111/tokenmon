@@ -57,7 +57,7 @@ public enum OpenCodeBackfillService {
         let checkpoint = try IngestSourceCheckpointStore.loadOrCreate(
             database: database,
             sourceKey: key,
-            sourceKind: "recovery_scan",
+            sourceKind: "ndjson_file",
             path: dbPath
         )
         let sinceValue = checkpoint.lastEventFingerprint
@@ -97,7 +97,7 @@ public enum OpenCodeBackfillService {
                 events: events,
                 sourceKey: key,
                 sourcePath: dbPath,
-                sourceKind: "recovery_scan",
+                sourceKind: "ndjson_file",
                 manageSourceCheckpoint: false
             )
 
