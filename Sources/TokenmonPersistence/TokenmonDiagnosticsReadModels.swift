@@ -319,6 +319,12 @@ public extension TokenmonDatabaseManager {
                 "missing_configuration",
                 "Cursor usage export has not been imported yet"
             )
+        case .opencode:
+            return (
+                sourceMode ?? "opencode_sqlite_live",
+                "missing_configuration",
+                "OpenCode has not been detected yet"
+            )
         }
     }
 
@@ -332,6 +338,8 @@ public extension TokenmonDatabaseManager {
             return "unavailable"
         case .cursor:
             return "api_sync_supported"
+        case .opencode:
+            return "unavailable"
         }
     }
 
@@ -355,6 +363,8 @@ public extension TokenmonDatabaseManager {
         case .gemini:
             return healthState != "missing_configuration" && healthState != "unsupported"
         case .cursor:
+            return healthState != "missing_configuration" && healthState != "unsupported"
+        case .opencode:
             return healthState != "missing_configuration" && healthState != "unsupported"
         }
     }

@@ -1767,6 +1767,30 @@ public final class TokenmonDatabaseManager {
                 """,
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_party_members_slot ON party_members(slot_order);",
             ]),
+            SQLiteMigration(version: 10, statements: [
+                """
+                INSERT INTO providers (
+                    provider_code,
+                    display_name,
+                    default_support_level,
+                    is_enabled,
+                    created_at,
+                    updated_at
+                ) VALUES (
+                    'opencode',
+                    'OpenCode',
+                    'best_effort',
+                    1,
+                    strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                    strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                )
+                ON CONFLICT(provider_code) DO UPDATE SET
+                    display_name = excluded.display_name,
+                    default_support_level = excluded.default_support_level,
+                    is_enabled = 1,
+                    updated_at = excluded.updated_at;
+                """,
+            ]),
         ]
     }
 }

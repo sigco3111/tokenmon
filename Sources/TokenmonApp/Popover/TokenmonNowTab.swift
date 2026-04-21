@@ -105,7 +105,7 @@ struct TokenmonNowTab: View {
         }
         .padding(.horizontal, 14)
         .padding(.top, 12)
-        .padding(.bottom, 10)
+        .padding(.bottom, 16)
         .frame(width: 300, alignment: .topLeading)
     }
 
@@ -446,6 +446,8 @@ private extension ProviderCode {
             return "Gemini"
         case .cursor:
             return "Cursor"
+        case .opencode:
+            return "OpenCode"
         }
     }
 }

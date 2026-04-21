@@ -658,3 +658,19 @@
 "settings.providers.source_mode.cursor_usage_export_api" = "Usage export 동기화";
 "settings.providers.next_step.cursor_missing_configuration" = "Tokenmon에서 Cursor usage sync를 실행해 최신 managed-only accounting 데이터를 가져오세요.";
 "settings.feedback.cursor_sync_started" = "Cursor 사용량을 Tokenmon으로 동기화하는 중…";
+
+"provider.opencode.missing.title" = "OpenCode 감지 안 됨";
+"provider.opencode.missing.detail" = "OpenCode를 설치하거나 경로를 지정하세요.";
+"provider.opencode.missing.custom_path_detail" = "사용자 지정 경로에서 OpenCode를 찾지 못했습니다. 경로를 수정하거나 자동 감지로 되돌리세요.";
+"provider.opencode.ready.title" = "OpenCode 준비됨";
+"provider.opencode.ready.detail" = "OpenCode가 설치되어 있으며 세션 데이터를 사용할 수 있습니다.";
+"provider.opencode.connected.title" = "OpenCode 연결됨";
+"provider.opencode.connected.detail" = "백그라운드에서 OpenCode 세션을 추적하고 있습니다.";
+"provider.opencode.repair.title" = "OpenCode 설정 필요";
+"provider.opencode.repair.detail" = "OpenCode가 감지되었지만 추가 설정이 필요합니다.";
+"provider.opencode.repair.action" = "OpenCode 설정";
+"provider.opencode.sync.title" = "OpenCode 동기화";
+"provider.opencode.sync.detail" = "로컬 데이터베이스에서 OpenCode 세션 데이터를 읽어옵니다.";
+"provider.opencode.sync.action" = "지금 동기화";
+"provider.opencode.sync_again.action" = "OpenCode 다시 동기화";
+"provider.install.opencode.success" = "OpenCode가 Tokenmon용으로 설정되었습니다. 로컬 데이터베이스에서 세션 데이터를 읽어옵니다.";

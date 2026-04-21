@@ -1136,6 +1136,14 @@ struct TokenmonDataContractTests {
     }
 
     @Test
+    func providerCodeIncludesOpenCodeWithExpectedMetadata() {
+        #expect(ProviderCode.allCases.contains(.opencode))
+        #expect(ProviderCode(rawValue: "opencode") == .opencode)
+        #expect(ProviderCode.opencode.displayName == "OpenCode")
+        #expect(ProviderCode.opencode.defaultSupportLevel == "best_effort")
+    }
+
+    @Test
     func migrationVersionSixSeedsGeminiProviderRow() throws {
         let tempDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("tokenmon-mig-v6-\(UUID().uuidString)", isDirectory: true)
@@ -1171,6 +1179,40 @@ struct TokenmonDataContractTests {
             SQLiteDatabase.columnText(statement, index: 0)
         }
         #expect(displayName == "Gemini CLI")
+    }
+
+    @Test
+    func migrationVersionTenSeedsOpenCodeProviderRow() throws {
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tokenmon-mig-v10-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+
+        let dbPath = tempDirectory.appendingPathComponent("tokenmon.sqlite").path
+        let manager = TokenmonDatabaseManager(path: dbPath)
+        try manager.bootstrap()
+
+        let database = try manager.open()
+
+        try database.execute("PRAGMA user_version = 9;")
+        try database.execute("DELETE FROM providers WHERE provider_code = 'opencode';")
+
+        _ = try manager.open()
+
+        let count = try database.fetchOne(
+            "SELECT COUNT(*) FROM providers WHERE provider_code = 'opencode';"
+        ) { statement in
+            SQLiteDatabase.columnInt64(statement, index: 0)
+        } ?? 0
+
+        #expect(count == 1)
+
+        let displayName = try database.fetchOne(
+            "SELECT display_name FROM providers WHERE provider_code = 'opencode';"
+        ) { statement in
+            SQLiteDatabase.columnText(statement, index: 0)
+        }
+        #expect(displayName == "OpenCode")
     }
 
     @Test

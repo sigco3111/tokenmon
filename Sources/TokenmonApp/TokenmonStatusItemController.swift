@@ -107,6 +107,7 @@ final class TokenmonSceneDebugController: ObservableObject {
 final class TokenmonAppController {
     static let shared = TokenmonAppController()
     private static let cursorSyncIntervalNanoseconds: UInt64 = 20_000_000_000
+    private static let openCodeSyncIntervalNanoseconds: UInt64 = 30_000_000_000
 
     let sceneDebugController = TokenmonSceneDebugController.shared
     let menuModel: TokenmonMenuModel
@@ -120,6 +121,7 @@ final class TokenmonAppController {
     private var startupTask: Task<Void, Never>?
     private var recoveryTask: Task<Void, Never>?
     private var cursorSyncTask: Task<Void, Never>?
+    private var openCodeSyncTask: Task<Void, Never>?
 
     private lazy var statusItemController: TokenmonStatusItemController = {
         let controller = TokenmonStatusItemController(
@@ -369,6 +371,27 @@ final class TokenmonAppController {
                         "cursor_background_sync_started",
                         startedAt: cursorSyncStartedAt,
                         metadata: ["interval_seconds": "20"]
+                    )
+                }
+
+                let openCodeDBPath = TokenmonProviderDiscovery.opencodeDBPath(preferences: self.menuModel.providerInstallationPreferences)
+                if FileManager.default.fileExists(atPath: openCodeDBPath) {
+                    let openCodeSyncStartedAt = Date()
+                    self.openCodeSyncTask = Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        await self.menuModel.syncOpenCodeUsageInBackground()
+                        while Task.isCancelled == false {
+                            do {
+                                try await Task.sleep(nanoseconds: Self.openCodeSyncIntervalNanoseconds)
+                            } catch { return }
+                            guard Task.isCancelled == false else { return }
+                            await self.menuModel.syncOpenCodeUsageInBackground()
+                        }
+                    }
+                    logStartupPhase(
+                        "opencode_background_sync_started",
+                        startedAt: openCodeSyncStartedAt,
+                        metadata: ["interval_seconds": "30"]
                     )
                 }
 

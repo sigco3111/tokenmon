@@ -939,6 +939,10 @@ final class TokenmonMenuModel: ObservableObject {
         await performCursorUsageSync(.background)
     }
 
+    func syncOpenCodeUsageInBackground() async {
+        await performOpenCodeUsageSync(.background)
+    }
+
     func runTranscriptBackfill(
         provider: ProviderCode,
         transcriptPath: String,
@@ -1001,6 +1005,34 @@ final class TokenmonMenuModel: ObservableObject {
                 settingsMessage = TokenmonL10n.string("settings.feedback.gemini_backfill_unsupported")
             case .cursor:
                 settingsMessage = "Cursor transcript backfill is not supported"
+            case .opencode:
+                let dbPath = TokenmonProviderDiscovery.opencodeDBPath(preferences: providerInstallationPreferences)
+                let result = try OpenCodeBackfillService.run(
+                    databasePath: databasePath,
+                    dbPath: dbPath
+                )
+                if result.backfillRunID > 0 {
+                    analyticsTracker.captureBackfillRunCompleted(
+                        BackfillRunSummary(
+                            backfillRunID: result.backfillRunID,
+                            provider: .opencode,
+                            mode: "opencode_sqlite_backfill",
+                            status: result.status,
+                            startedAt: completedAt,
+                            completedAt: completedAt,
+                            samplesExamined: result.samplesExamined,
+                            samplesCreated: result.samplesCreated,
+                            duplicatesSkipped: result.duplicatesSkipped,
+                            errorsCount: result.errorsCount,
+                            summaryJSON: result.summaryJSON
+                        )
+                    )
+                }
+                if result.status == "noop" {
+                    settingsMessage = TokenmonL10n.string("settings.feedback.opencode_backfill_noop")
+                } else {
+                    settingsMessage = TokenmonL10n.format("settings.feedback.opencode_backfill_complete", result.samplesCreated, result.duplicatesSkipped)
+                }
             }
             settingsError = nil
             refresh(reason: .manual)
@@ -1754,6 +1786,71 @@ private extension TokenmonMenuModel {
     }
 }
 
+private enum TokenmonOpenCodeSyncPresentation {
+    case manual
+    case background
+}
+
+private extension TokenmonMenuModel {
+    @MainActor
+    func performOpenCodeUsageSync(_ presentation: TokenmonOpenCodeSyncPresentation) async {
+        let dbPath = TokenmonProviderDiscovery.opencodeDBPath(preferences: providerInstallationPreferences)
+
+        guard FileManager.default.fileExists(atPath: dbPath) else {
+            if presentation == .manual {
+                settingsError = "OpenCode database not found"
+                settingsMessage = nil
+                refresh(reason: .manual)
+            }
+            return
+        }
+
+        let databasePath = self.databasePath
+
+        do {
+            let result = try await Task.detached(priority: .utility) {
+                try OpenCodeBackfillService.run(
+                    databasePath: databasePath,
+                    dbPath: dbPath
+                )
+            }.value
+
+            if result.samplesCreated > 0 {
+                recordLiveActivityPulse()
+            }
+
+            switch presentation {
+            case .manual:
+                if result.status == "noop" {
+                    settingsMessage = TokenmonL10n.string("settings.feedback.opencode_backfill_noop")
+                } else {
+                    settingsMessage = TokenmonL10n.format("settings.feedback.opencode_backfill_complete", result.samplesCreated, result.duplicatesSkipped)
+                }
+                settingsError = nil
+                refresh(reason: .manual)
+            case .background:
+                if result.samplesCreated > 0 {
+                    refresh(reason: .manual)
+                }
+            }
+        } catch {
+            switch presentation {
+            case .manual:
+                settingsError = error.localizedDescription
+                settingsMessage = nil
+                refresh(reason: .manual)
+            case .background:
+                TokenmonAppBehaviorLogger.debug(
+                    category: "providers",
+                    event: "opencode_background_sync_failed",
+                    metadata: ["error": error.localizedDescription],
+                    supportDirectoryPath: supportDirectoryPath
+                )
+            }
+        }
+    }
+}
+
 enum TokenmonSceneContextResolver {
     static func popoverContext(
         displayedSceneContext: TokenmonSceneContext?,
@@ -2468,6 +2565,9 @@ final class TokenmonInboxMonitor: @unchecked Sendable {
                 ProviderBackfillRequestQueue.removeRequest(at: pendingRequest.filePath)
                 continue
             case .cursor:
+                ProviderBackfillRequestQueue.removeRequest(at: pendingRequest.filePath)
+                continue
+            case .opencode:
                 ProviderBackfillRequestQueue.removeRequest(at: pendingRequest.filePath)
                 continue
             }

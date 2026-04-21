@@ -97,6 +97,18 @@ enum TokenmonProviderDiscovery {
             .path
     }
 
+    static func opencodeDBPath(
+        preferences: ProviderInstallationPreferences
+    ) -> String {
+        opencodeDBPath(configurationRootPath: discover(provider: .opencode, preferences: preferences).configurationRootPath)
+    }
+
+    static func opencodeDBPath(configurationRootPath: String) -> String {
+        URL(fileURLWithPath: configurationRootPath, isDirectory: true)
+            .appendingPathComponent("opencode.db")
+            .path
+    }
+
     static func resolvedHomeDirectory() -> URL {
         if let override = ProcessInfo.processInfo.environment["TOKENMON_HOME_OVERRIDE"],
            override.isEmpty == false {
@@ -175,6 +187,8 @@ enum TokenmonProviderDiscovery {
             return "gemini"
         case .cursor:
             return "cursor"
+        case .opencode:
+            return "opencode"
         }
     }
 
@@ -190,6 +204,8 @@ enum TokenmonProviderDiscovery {
             return resolvedHomeDirectory()
                 .appendingPathComponent("Library/Application Support/Cursor/User", isDirectory: true)
                 .path
+        case .opencode:
+            return resolvedHomeDirectory().appendingPathComponent(".local/share/opencode", isDirectory: true).path
         }
     }
 

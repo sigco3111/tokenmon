@@ -1,0 +1,6 @@
+assistant_message_count=6
+session_count=2
+
+# Verification SQL (for reference):
+# sqlite3 sample-opencode.db "SELECT COUNT(*) FROM message WHERE json_extract(data, '$.role') = 'assistant';"
+# sqlite3 sample-opencode.db "SELECT COUNT(*) FROM session;"

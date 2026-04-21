@@ -4,10 +4,10 @@
 
 평소처럼 AI 코딩하면, 메뉴 막대에서 Tokenmon이 조용히 모입니다.
 
-Tokenmon은 Claude Code와 Codex 사용을 가볍고 귀여운 수집 경험으로
-바꿔주는 macOS 메뉴 막대 앱입니다. 코딩하는 동안 탐험이 쌓이고, 가끔
-새로운 Tokenmon을 만나며, 포획 결과와 Dex가 계정 없이 Mac 안에
-차곡차곡 쌓입니다.
+Tokenmon은 Claude Code, Codex, OpenCode, Gemini, Cursor 사용을 가볍고
+귀여운 수집 경험으로 바꿔주는 macOS 메뉴 막대 앱입니다. 코딩하는 동안
+탐험이 쌓이고, 가끔 새로운 Tokenmon을 만나며, 포획 결과와 Dex가 계정
+없이 Mac 안에 차곡차곡 쌓입니다.
 
 ![Tokenmon animated menu hero](assets/screenshots/variants/korean/dark/menu-hero.gif)
 

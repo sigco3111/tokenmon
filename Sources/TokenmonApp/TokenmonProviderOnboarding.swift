@@ -56,6 +56,8 @@ enum TokenmonProviderOnboarding {
                 return inspectGemini(preferences: preferences)
             case .cursor:
                 return inspectCursor(databasePath: databasePath, preferences: preferences)
+            case .opencode:
+                return inspectOpenCode(preferences: preferences)
             }
         }
     }
@@ -90,6 +92,8 @@ enum TokenmonProviderOnboarding {
                 provider: .cursor,
                 message: "Cursor sync is managed through scripts/cursor-usage-prototype"
             )
+        case .opencode:
+            return try installOpenCode(preferences: preferences)
         }
     }
 
@@ -810,6 +814,63 @@ enum TokenmonProviderOnboarding {
         if FileManager.default.fileExists(atPath: backupPath) == false {
             try FileManager.default.copyItem(atPath: path, toPath: backupPath)
         }
+    }
+
+    private static func inspectOpenCode(
+        preferences: ProviderInstallationPreferences
+    ) -> TokenmonProviderOnboardingStatus {
+        let discovery = TokenmonProviderDiscovery.discover(provider: .opencode, preferences: preferences)
+        let cliInstalled = discovery.executableExists
+        guard cliInstalled else {
+            return TokenmonProviderOnboardingStatus(
+                provider: .opencode,
+                cliInstalled: false,
+                isConnected: false,
+                isPartial: false,
+                title: TokenmonL10n.string("provider.opencode.missing.title"),
+                detail: discovery.usesCustomExecutablePath
+                    ? TokenmonL10n.string("provider.opencode.missing.custom_path_detail")
+                    : TokenmonL10n.string("provider.opencode.missing.detail"),
+                actionTitle: nil,
+                executablePath: discovery.executablePath,
+                executableSource: discovery.executableSource,
+                configurationPath: discovery.configurationPath,
+                configurationSource: discovery.configurationSource,
+                usesCustomExecutablePath: discovery.usesCustomExecutablePath,
+                usesCustomConfigurationPath: discovery.usesCustomConfigurationPath,
+                codexMode: nil
+            )
+        }
+
+        let dbPath = TokenmonProviderDiscovery.opencodeDBPath(preferences: preferences)
+        let dbExists = FileManager.default.fileExists(atPath: dbPath)
+
+        return TokenmonProviderOnboardingStatus(
+            provider: .opencode,
+            cliInstalled: true,
+            isConnected: dbExists,
+            isPartial: cliInstalled && !dbExists,
+            title: TokenmonL10n.string(dbExists ? "provider.opencode.connected.title" : "provider.opencode.ready.title"),
+            detail: TokenmonL10n.string(dbExists ? "provider.opencode.connected.detail" : "provider.opencode.ready.detail"),
+            actionTitle: nil,
+            executablePath: discovery.executablePath,
+            executableSource: discovery.executableSource,
+            configurationPath: discovery.configurationPath,
+            configurationSource: discovery.configurationSource,
+            usesCustomExecutablePath: discovery.usesCustomExecutablePath,
+            usesCustomConfigurationPath: discovery.usesCustomConfigurationPath,
+            codexMode: nil
+        )
+    }
+
+    private static func installOpenCode(
+        preferences: ProviderInstallationPreferences
+    ) throws -> TokenmonProviderInstallResult {
+        _ = preferences
+        return TokenmonProviderInstallResult(
+            provider: .opencode,
+            message: TokenmonL10n.string("provider.install.opencode.success")
+        )
     }
 }
 

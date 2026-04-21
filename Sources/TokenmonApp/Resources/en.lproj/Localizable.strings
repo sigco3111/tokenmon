@@ -312,3 +312,19 @@
 "settings.providers.source_mode.cursor_usage_export_api" = "Usage export sync";
 "settings.providers.next_step.cursor_missing_configuration" = "Sync Cursor usage from Tokenmon to import the latest managed-only accounting data.";
 "settings.feedback.cursor_sync_started" = "Syncing Cursor usage into Tokenmon…";
+
+"provider.opencode.missing.title" = "OpenCode Not Found";
+"provider.opencode.missing.detail" = "Install OpenCode to start tracking token usage";
+"provider.opencode.missing.custom_path_detail" = "Custom path does not point to a valid OpenCode binary";
+"provider.opencode.ready.title" = "OpenCode Ready";
+"provider.opencode.ready.detail" = "OpenCode is installed and session data is available";
+"provider.opencode.connected.title" = "OpenCode Connected";
+"provider.opencode.connected.detail" = "Tracking OpenCode sessions in the background";
+"provider.opencode.repair.title" = "OpenCode Needs Setup";
+"provider.opencode.repair.detail" = "OpenCode was found but needs configuration";
+"provider.opencode.repair.action" = "Set Up OpenCode";
+"provider.opencode.sync.title" = "OpenCode Sync";
+"provider.opencode.sync.detail" = "OpenCode session data is read from the local database";
+"provider.opencode.sync.action" = "Sync Now";
+"provider.opencode.sync_again.action" = "Sync Again";
+"provider.install.opencode.success" = "OpenCode has been configured for Tokenmon. Session data will be read from the local database.";

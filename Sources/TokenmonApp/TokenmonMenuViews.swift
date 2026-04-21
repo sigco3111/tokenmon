@@ -1910,6 +1910,8 @@ private struct TokenmonProviderSettingsCard: View {
             return "antenna.radiowaves.left.and.right"
         case .cursor:
             return "arrow.triangle.branch"
+        case .opencode:
+            return "terminal"
         }
     }
 

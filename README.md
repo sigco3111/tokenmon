@@ -5,9 +5,9 @@
 Turn everyday AI coding into a quiet creature-collection loop.
 
 Tokenmon is a macOS menu bar companion for people who spend their day in Claude
-Code and Codex. Keep coding like normal, let exploration build in the
-background, and watch new creatures appear, resolve, and fill your Dex without
-asking for an account or your prompt history.
+Code, Codex, OpenCode, Gemini, and Cursor. Keep coding like normal, let
+exploration build in the background, and watch new creatures appear, resolve,
+and fill your Dex without asking for an account or your prompt history.
 
 ![Tokenmon animated menu hero](assets/screenshots/variants/english/dark/menu-hero.gif)
 
