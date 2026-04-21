@@ -63,10 +63,32 @@ public enum OpenCodeBackfillService {
         let sinceValue = checkpoint.lastEventFingerprint
 
         do {
-            let events = try OpenCodeSQLiteAdapter.providerEvents(
+            let rawEvents = try OpenCodeSQLiteAdapter.providerEvents(
                 from: dbPath,
                 since: sinceValue
             )
+
+            let events = rawEvents.map { event in
+                ProviderUsageSampleEvent(
+                    eventType: event.eventType,
+                    provider: event.provider,
+                    sourceMode: event.sourceMode,
+                    providerSessionID: event.providerSessionID,
+                    observedAt: event.observedAt,
+                    workspaceDir: event.workspaceDir,
+                    modelSlug: event.modelSlug,
+                    transcriptPath: event.transcriptPath,
+                    totalInputTokens: event.totalInputTokens,
+                    totalOutputTokens: event.totalOutputTokens,
+                    totalCachedInputTokens: event.totalCachedInputTokens,
+                    normalizedTotalTokens: event.normalizedTotalTokens,
+                    providerEventFingerprint: event.providerEventFingerprint,
+                    rawReference: event.rawReference,
+                    currentInputTokens: event.currentInputTokens,
+                    currentOutputTokens: event.currentOutputTokens,
+                    sessionOriginHint: .startedDuringLiveRuntime
+                )
+            }
 
             if events.isEmpty {
                 try upsertBackfillHealth(
