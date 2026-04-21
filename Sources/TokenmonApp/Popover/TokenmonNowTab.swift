@@ -105,7 +105,7 @@ struct TokenmonNowTab: View {
         }
         .padding(.horizontal, 14)
         .padding(.top, 12)
-        .padding(.bottom, 16)
+        .padding(.bottom, 20)
         .frame(width: 300, alignment: .topLeading)
     }
 

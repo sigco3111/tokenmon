@@ -11,7 +11,7 @@ struct TokenmonPopoverContainerActions {
 
 struct TokenmonPopoverContainer: View {
     static let width: CGFloat = 360
-    static let height: CGFloat = 520
+    static let height: CGFloat = 560
     static let contentWidth: CGFloat = 300
 
     @ObservedObject var model: TokenmonMenuModel
